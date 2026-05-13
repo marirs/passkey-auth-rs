@@ -74,7 +74,11 @@ impl Webauthn {
     /// The `userVerification` string we put into the challenge JSON.
     /// Mirrors `require_uv`: "required" if strict, "preferred" otherwise.
     fn uv_token(&self) -> &'static str {
-        if self.require_uv { "required" } else { "preferred" }
+        if self.require_uv {
+            "required"
+        } else {
+            "preferred"
+        }
     }
 
     // ─── Registration ─────────────────────────────────────────────────

@@ -115,5 +115,4 @@ mod tests {
         bad[n - 1] ^= 0x01;
         assert!(verify(&key, msg, &bad).is_err());
     }
-
 }

@@ -175,9 +175,7 @@ pub(crate) fn b64url_decode(s: &str) -> Result<Vec<u8>> {
         return Ok(v);
     }
     // 4. standard alphabet, with padding (last-ditch; report this error)
-    B64STD
-        .decode(s)
-        .map_err(|e| Error::Base64(e.to_string()))
+    B64STD.decode(s).map_err(|e| Error::Base64(e.to_string()))
 }
 
 // ---------- Wire structs (request bodies) -------------------------------

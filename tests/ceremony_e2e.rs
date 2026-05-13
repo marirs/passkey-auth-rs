@@ -22,9 +22,7 @@ use ciborium::value::Value as CborValue;
 use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
 
-use passkey_auth::{
-    AuthenticationResponse, Error, RegistrationResponse, Webauthn,
-};
+use passkey_auth::{AuthenticationResponse, Error, RegistrationResponse, Webauthn};
 
 const RP_ID: &str = "example.com";
 const ORIGIN: &str = "https://example.com";
@@ -65,10 +63,16 @@ impl FakeAuthenticator {
     fn cose_pubkey(&self) -> Vec<u8> {
         let pk = self.sk.verifying_key().to_bytes().to_vec();
         let map = CborValue::Map(vec![
-            (CborValue::Integer(1.into()), CborValue::Integer(1.into())),  // kty=OKP
-            (CborValue::Integer(3.into()), CborValue::Integer((-8).into())), // alg=EdDSA
-            (CborValue::Integer((-1).into()), CborValue::Integer(6.into())), // crv=Ed25519
-            (CborValue::Integer((-2).into()), CborValue::Bytes(pk)),         // x=pub
+            (CborValue::Integer(1.into()), CborValue::Integer(1.into())), // kty=OKP
+            (
+                CborValue::Integer(3.into()),
+                CborValue::Integer((-8).into()),
+            ), // alg=EdDSA
+            (
+                CborValue::Integer((-1).into()),
+                CborValue::Integer(6.into()),
+            ), // crv=Ed25519
+            (CborValue::Integer((-2).into()), CborValue::Bytes(pk)),      // x=pub
         ]);
         let mut out = Vec::new();
         ciborium::ser::into_writer(&map, &mut out).unwrap();
@@ -112,9 +116,18 @@ impl FakeAuthenticator {
     /// attestationObject for fmt=none, wrapping the registration authData.
     fn attestation_object(&self) -> Vec<u8> {
         let map = CborValue::Map(vec![
-            (CborValue::Text("fmt".into()), CborValue::Text("none".into())),
-            (CborValue::Text("attStmt".into()), CborValue::Map(Vec::new())),
-            (CborValue::Text("authData".into()), CborValue::Bytes(self.auth_data_register())),
+            (
+                CborValue::Text("fmt".into()),
+                CborValue::Text("none".into()),
+            ),
+            (
+                CborValue::Text("attStmt".into()),
+                CborValue::Map(Vec::new()),
+            ),
+            (
+                CborValue::Text("authData".into()),
+                CborValue::Bytes(self.auth_data_register()),
+            ),
         ]);
         let mut out = Vec::new();
         ciborium::ser::into_writer(&map, &mut out).unwrap();
@@ -164,7 +177,9 @@ fn register_then_authenticate_happy_path() {
         client_data_json: cdj_b64,
     };
 
-    let credential = wa.finish_registration(&state, &response).expect("registration must succeed");
+    let credential = wa
+        .finish_registration(&state, &response)
+        .expect("registration must succeed");
     assert_eq!(credential.id.as_bytes(), auth.credential_id.as_slice());
     assert_eq!(credential.counter, 0);
     assert_eq!(credential.transports, vec!["internal".to_string()]);
@@ -184,7 +199,9 @@ fn register_then_authenticate_happy_path() {
         user_handle: None,
     };
 
-    let outcome = wa.finish_authentication(&state, &response, &credential).expect("auth must succeed");
+    let outcome = wa
+        .finish_authentication(&state, &response, &credential)
+        .expect("auth must succeed");
     assert_eq!(outcome.new_counter, 1);
     assert!(outcome.user_verified);
 }
@@ -213,7 +230,9 @@ fn counter_replay_rejected() {
         user_handle: None,
     };
 
-    let err = wa.finish_authentication(&state, &response, &stored).unwrap_err();
+    let err = wa
+        .finish_authentication(&state, &response, &stored)
+        .unwrap_err();
     assert!(matches!(err, Error::CounterReplay { stored: 5, new: 5 }));
 }
 
@@ -239,7 +258,9 @@ fn require_uv_rejects_uv_less_assertion() {
         user_handle: None,
     };
 
-    let err = wa.finish_authentication(&state, &response, &credential).unwrap_err();
+    let err = wa
+        .finish_authentication(&state, &response, &credential)
+        .unwrap_err();
     assert!(matches!(err, Error::UserNotVerified), "got {err:?}");
 }
 
@@ -263,7 +284,9 @@ fn wrong_origin_rejected() {
         user_handle: None,
     };
 
-    let err = wa.finish_authentication(&state, &response, &credential).unwrap_err();
+    let err = wa
+        .finish_authentication(&state, &response, &credential)
+        .unwrap_err();
     assert!(matches!(err, Error::OriginMismatch { .. }), "got {err:?}");
 }
 
@@ -276,11 +299,7 @@ fn wrong_challenge_rejected() {
     let (_chal, state) = wa.start_authentication(&[credential.id.clone()]);
     let auth_data = auth.auth_data_authenticate(None);
     // ClientDataJSON contains a challenge we never issued.
-    let (cdj_raw, cdj_b64) = client_data(
-        "webauthn.get",
-        &B64URL.encode([0u8; 32]),
-        ORIGIN,
-    );
+    let (cdj_raw, cdj_b64) = client_data("webauthn.get", &B64URL.encode([0u8; 32]), ORIGIN);
     let sig = auth.sign_assertion(&auth_data, &cdj_raw);
 
     let response = AuthenticationResponse {
@@ -291,7 +310,9 @@ fn wrong_challenge_rejected() {
         user_handle: None,
     };
 
-    let err = wa.finish_authentication(&state, &response, &credential).unwrap_err();
+    let err = wa
+        .finish_authentication(&state, &response, &credential)
+        .unwrap_err();
     assert!(matches!(err, Error::ChallengeMismatch), "got {err:?}");
 }
 
@@ -307,5 +328,6 @@ fn do_register(wa: &Webauthn, auth: &mut FakeAuthenticator) -> passkey_auth::Pas
         attestation_object: attestation,
         client_data_json: cdj_b64,
     };
-    wa.finish_registration(&state, &response).expect("registration must succeed")
+    wa.finish_registration(&state, &response)
+        .expect("registration must succeed")
 }
