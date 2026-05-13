@@ -69,7 +69,7 @@ fn verify_ed25519(key: &[u8; 32], msg: &[u8], sig: &[u8]) -> Result<()> {
 mod tests {
     use super::*;
     use ed25519_dalek::{Signer as _, SigningKey};
-    use p256::ecdsa::{SigningKey as EsSigningKey, signature::Signer as _};
+    use p256::ecdsa::SigningKey as EsSigningKey;
     use rand::RngCore;
 
     #[test]
@@ -98,8 +98,9 @@ mod tests {
         let ys = pt.y().expect("y coord");
         let mut x = [0u8; 32];
         let mut y = [0u8; 32];
-        x.copy_from_slice(xs.as_slice());
-        y.copy_from_slice(ys.as_slice());
+        // GenericArray derefs to &[u8] - avoid the deprecated as_slice().
+        x.copy_from_slice(&xs[..]);
+        y.copy_from_slice(&ys[..]);
 
         let msg = b"hello passkey world";
         let sig: EsSig = sk.sign(msg);
