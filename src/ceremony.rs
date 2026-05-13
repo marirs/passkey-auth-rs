@@ -209,11 +209,18 @@ impl Webauthn {
     /// `allow_credentials` SHOULD be the user's registered credential
     /// IDs; can be empty for discoverable-credential ("usernameless")
     /// flows.
+    ///
+    /// Convenience form that omits the `transports` hint in the
+    /// challenge JSON. Browsers will fall back to "try every transport"
+    /// which usually works but adds a small UX delay (e.g. the browser
+    /// may briefly poll for BLE devices that the credential cannot
+    /// actually use). For best UX, prefer
+    /// [`Self::start_authentication_with_creds`] which threads the
+    /// per-credential transports captured at registration.
     pub fn start_authentication(
         &self,
         allow_credentials: &[CredentialId],
     ) -> (AuthenticationChallenge, AuthenticationState) {
-        let challenge = Challenge::random();
         let descriptors = allow_credentials
             .iter()
             .map(|c| CredentialDescriptor {
@@ -222,6 +229,38 @@ impl Webauthn {
                 transports: Vec::new(),
             })
             .collect();
+        self.build_auth_challenge(allow_credentials, descriptors)
+    }
+
+    /// Like [`Self::start_authentication`] but pulls the `transports`
+    /// hint from each stored credential. This is the version a real
+    /// deployment usually wants: the browser narrows authenticator
+    /// discovery to the channels we know work for the credential
+    /// (e.g. "internal" for Touch ID, "usb" + "nfc" for a Yubikey).
+    pub fn start_authentication_with_creds(
+        &self,
+        allow_credentials: &[PasskeyCredential],
+    ) -> (AuthenticationChallenge, AuthenticationState) {
+        let descriptors = allow_credentials
+            .iter()
+            .map(|c| CredentialDescriptor {
+                kind: "public-key",
+                id: c.id.to_b64url(),
+                transports: c.transports.clone(),
+            })
+            .collect();
+        let ids: Vec<CredentialId> = allow_credentials.iter().map(|c| c.id.clone()).collect();
+        self.build_auth_challenge(&ids, descriptors)
+    }
+
+    /// Internal: assemble the challenge JSON + state from already-built
+    /// descriptors. Shared by both `start_authentication*` entry points.
+    fn build_auth_challenge(
+        &self,
+        ids: &[CredentialId],
+        descriptors: Vec<CredentialDescriptor>,
+    ) -> (AuthenticationChallenge, AuthenticationState) {
+        let challenge = Challenge::random();
         let chal = AuthenticationChallenge {
             challenge: challenge.to_b64url(),
             rp_id: self.rp_id.as_str().to_owned(),
@@ -231,7 +270,7 @@ impl Webauthn {
         };
         let state = AuthenticationState {
             challenge,
-            allow_credentials: allow_credentials.to_vec(),
+            allow_credentials: ids.to_vec(),
         };
         (chal, state)
     }
