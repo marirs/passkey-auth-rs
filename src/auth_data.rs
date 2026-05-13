@@ -101,13 +101,8 @@ impl AuthenticatorData {
         // map. We don't use any extensions, so we silently skip - but
         // we DO check the bytes parse as valid CBOR to catch corruption.
         if flags & FLAG_ED != 0 && bytes.len() > pos {
-            let _: CborValue = ciborium::de::from_reader(&bytes[pos..]).map_err(|e| {
-                Error::AuthData(if e.to_string().is_empty() {
-                    "extensions CBOR invalid"
-                } else {
-                    "extensions CBOR parse failed"
-                })
-            })?;
+            let _: CborValue = ciborium::de::from_reader(&bytes[pos..])
+                .map_err(|_| Error::AuthData("extensions CBOR parse failed"))?;
         }
 
         Ok(Self {
