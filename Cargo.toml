@@ -5,10 +5,11 @@ edition     = "2024"
 rust-version = "1.85"
 license     = "MIT OR Apache-2.0"
 description = "Pure-Rust WebAuthn server library focused on passkeys (no openssl)."
-repository  = "https://github.com/marirs/passkey-rs"
+repository  = "https://github.com/marirs/passkey-auth"
 readme      = "README.md"
 keywords    = ["webauthn", "passkey", "fido2", "authentication"]
 categories  = ["authentication", "cryptography"]
+authors     = ["Sriram <marirs@gmail.com>"]
 
 [lib]
 name = "passkey_auth"
@@ -40,3 +41,10 @@ url           = "2"
 [dev-dependencies]
 # Known-vector regression tests live under tests/.
 hex           = "0.4"
+# Integration tests synthesise authenticator output so they need the
+# same crypto + encoding primitives the real authenticator would use.
+base64        = "0.22"
+ciborium      = "0.2"
+ed25519-dalek = { version = "2", features = ["pkcs8", "rand_core"] }
+sha2          = "0.10"
+rand          = "0.8"
