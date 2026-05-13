@@ -113,6 +113,11 @@ impl Webauthn {
                 name: user_name.to_owned(),
                 display_name: user_display_name.to_owned(),
             },
+            // Algorithm preference, MOST-preferred first per the
+            // WebAuthn spec. ES256 leads because every passkey-class
+            // authenticator (Touch ID, Windows Hello, Android, Yubikey)
+            // implements it; EdDSA is a fallback for the small set of
+            // authenticators that prefer Ed25519 (some Yubikey 5+).
             pub_key_cred_params: vec![
                 PubKeyCredParam {
                     kind: "public-key",
