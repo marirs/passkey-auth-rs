@@ -48,3 +48,12 @@ ciborium      = "0.2"
 ed25519-dalek = { version = "2", features = ["pkcs8", "rand_core"] }
 sha2          = "0.10"
 rand          = "0.8"
+# The axum_server example wires the crate into a real HTTP server so
+# you can register / authenticate a real passkey in your browser.
+axum          = "0.7"
+tokio         = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+tower-http    = { version = "0.6", features = ["fs", "cors"] }
+
+[[example]]
+name = "axum_server"
+path = "examples/axum_server.rs"

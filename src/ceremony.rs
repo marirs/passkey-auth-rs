@@ -425,10 +425,7 @@ mod tests {
     #[test]
     fn attachment_tokens() {
         assert_eq!(Attachment::Platform.as_token(), Some("platform"));
-        assert_eq!(
-            Attachment::CrossPlatform.as_token(),
-            Some("cross-platform"),
-        );
+        assert_eq!(Attachment::CrossPlatform.as_token(), Some("cross-platform"),);
         assert_eq!(Attachment::Any.as_token(), None);
     }
 
@@ -444,10 +441,7 @@ mod tests {
         let wa_any = Webauthn::new("example.com", "Example", "https://example.com")
             .authenticator_attachment(Attachment::Any);
         let (chal, _) = wa_any.start_registration(b"u", "u", "U", &[]);
-        assert_eq!(
-            chal.authenticator_selection.authenticator_attachment,
-            None,
-        );
+        assert_eq!(chal.authenticator_selection.authenticator_attachment, None,);
 
         let wa_cross = Webauthn::new("example.com", "Example", "https://example.com")
             .authenticator_attachment(Attachment::CrossPlatform);

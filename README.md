@@ -115,6 +115,21 @@ This crate accepts **either** url-safe-base64 **or** standard-base64,
 with **or** without padding — so the obvious `btoa(...)` pattern works
 without a separate url-safe-conversion step.
 
+## Working example
+
+A runnable Axum server lives under [`examples/axum_server.rs`](examples/axum_server.rs):
+
+```bash
+cargo run --example axum_server
+# then open http://localhost:3000
+```
+
+It exposes four endpoints (`/register/start`, `/register/finish`,
+`/authenticate/start`, `/authenticate/finish`) and a tiny HTML page
+that drives `navigator.credentials.create` / `.get` in the browser.
+Works with Touch ID, Windows Hello, iCloud Keychain, Yubikey, and
+any other passkey-class authenticator the browser surfaces.
+
 ## Testing
 
 ```bash
