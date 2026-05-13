@@ -128,19 +128,30 @@ without a separate url-safe-conversion step.
 
 ## Working examples
 
-Two runnable HTTP servers live under [`examples/`](examples/), one
-per popular Rust web framework. Both expose the same four endpoints
-(`/register/start`, `/register/finish`, `/authenticate/start`,
-`/authenticate/finish`) and serve the same browser-side HTML page.
+Five runnable HTTP-server examples live under [`examples/`](examples/),
+covering the most common passkey-app patterns. All bind to
+<http://localhost:3000> — run **one at a time** in a passkey-capable
+browser (Touch ID, Windows Hello, iCloud Keychain, Yubikey, etc.).
+
+| Example | Framework | What it shows |
+|---|---|---|
+| [`axum_server`](examples/axum_server.rs) | Axum 0.7 | Minimal single-user register + authenticate |
+| [`rocket_server`](examples/rocket_server.rs) | Rocket 0.5 | Same as above, Rocket variant |
+| [`axum_passwordless`](examples/axum_passwordless.rs) | Axum 0.7 | **Multi-user** with **usernameless** sign-in (Gmail-style "tap to sign in", discoverable credentials, browser shows account picker) |
+| [`rocket_credential_manager`](examples/rocket_credential_manager.rs) | Rocket 0.5 | **Multiple devices per user**: register additional passkeys while signed in, list them, remove individual ones (refuses to remove the last) |
+| [`axum_sqlite`](examples/axum_sqlite.rs) | Axum 0.7 + rusqlite | **Persistent storage**: same as `axum_server` but credentials survive process restart in `passkeys.db` |
 
 ```bash
-cargo run --example axum_server     # Axum 0.7
-cargo run --example rocket_server   # Rocket 0.5
+cargo run --example axum_server                # start here
+cargo run --example axum_passwordless          # then try the Gmail flow
+cargo run --example rocket_credential_manager  # then try multi-device
+cargo run --example axum_sqlite                # then try persistence
 ```
 
-Open <http://localhost:3000> in a passkey-capable browser. Works
-with Touch ID, Windows Hello, iCloud Keychain, Yubikey, and any
-other passkey-class authenticator the browser surfaces.
+All five are explicitly **not for production** (in-memory sessions
+where applicable, single hard-coded user in the manager variant, no
+CSRF protection on the start endpoints) — read them as references for
+wiring the crate into your own server, not as copy-paste starters.
 
 ## Testing
 

@@ -75,6 +75,11 @@ rocket        = { version = "0.5", features = ["json"] }
 # under tests/.
 x509-cert     = { version = "0.2", features = ["builder", "std"] }
 
+# Persistent storage for the axum_sqlite example. `bundled` ships
+# the SQLite amalgamation so the example builds on machines that do
+# not have sqlite installed system-wide (notably Windows CI).
+rusqlite      = { version = "0.32", features = ["bundled"] }
+
 [[example]]
 name = "axum_server"
 path = "examples/axum_server.rs"
@@ -82,3 +87,15 @@ path = "examples/axum_server.rs"
 [[example]]
 name = "rocket_server"
 path = "examples/rocket_server.rs"
+
+[[example]]
+name = "axum_passwordless"
+path = "examples/axum_passwordless.rs"
+
+[[example]]
+name = "rocket_credential_manager"
+path = "examples/rocket_credential_manager.rs"
+
+[[example]]
+name = "axum_sqlite"
+path = "examples/axum_sqlite.rs"

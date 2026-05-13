@@ -5,3 +5,9 @@ target/
 Cargo.lock
 
 .DS_Store
+
+# Local SQLite databases left behind by the axum_sqlite example.
+passkeys.db
+passkeys.db-journal
+passkeys.db-wal
+passkeys.db-shm
