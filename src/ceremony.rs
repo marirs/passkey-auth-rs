@@ -283,17 +283,17 @@ impl Webauthn {
         msg.extend_from_slice(&cdj_hash);
         crypto::verify(&key, &msg, &sig)?;
 
-        // 5. Counter check. Per the spec: if both signCount and the
-        // stored counter are 0 the credential never increments, accept.
-        // Otherwise the new count MUST be strictly greater than the
-        // stored value - anything else is a likely cloned credential.
-        if ad.sign_count != 0 || stored.counter != 0 {
-            if ad.sign_count <= stored.counter {
-                return Err(Error::CounterReplay {
-                    stored: stored.counter,
-                    new: ad.sign_count,
-                });
-            }
+        // 5. Counter check. Per the spec: if BOTH signCount and the
+        // stored counter are 0, the credential never increments -
+        // accept. Otherwise the new count MUST be strictly greater
+        // than the stored value; anything else is a likely cloned
+        // credential.
+        let either_nonzero = ad.sign_count != 0 || stored.counter != 0;
+        if either_nonzero && ad.sign_count <= stored.counter {
+            return Err(Error::CounterReplay {
+                stored: stored.counter,
+                new: ad.sign_count,
+            });
         }
 
         Ok(AuthSuccess {
