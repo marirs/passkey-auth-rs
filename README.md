@@ -123,8 +123,8 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-CI exercises Linux x86_64 + aarch64, macOS Intel + Apple Silicon,
-and Windows x86_64 on every push.
+CI exercises Linux x86_64 + aarch64, macOS Apple Silicon, and
+Windows x86_64 on every push.
 
 ## License
 
