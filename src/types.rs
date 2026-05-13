@@ -332,6 +332,15 @@ pub struct PasskeyCredential {
     pub public_key_cose: CosePublicKey,
     pub counter: u32,
     pub transports: Vec<String>,
+    /// Authenticator AAGUID, as carried in attestedCredentialData.
+    ///
+    /// Informational only - this crate does NOT validate it against
+    /// the FIDO Metadata Service or any allow/deny list. Callers who
+    /// want authenticator-attestation policy (e.g. "reject Yubikeys
+    /// older than firmware 5.2") must implement that check themselves
+    /// using this field. With attestation "none" (our default), the
+    /// AAGUID is all zeros anyway; meaningful values only appear when
+    /// the client opts into a non-"none" attestation format.
     pub aaguid: [u8; 16],
 }
 
