@@ -12,6 +12,15 @@ Verifies registration + authentication responses from browsers/OS
 authenticators (Touch ID, Windows Hello, Android, iCloud Keychain,
 hardware keys).
 
+## Installation
+
+```toml
+[dependencies]
+passkey-auth = "0.1"
+```
+
+MSRV: **Rust 1.85** (edition 2024).
+
 ## Why this exists
 
 The reference Rust server library, `webauthn-rs`, hard-depends on
@@ -41,15 +50,6 @@ Not in scope:
 - Full attestation cert chain validation (FIDO MDS)
 - Conditional UI / discoverable credentials beyond what the server needs to know
 - RSA / RS256 (rare for passkeys; reject with a clear error)
-
-## Install
-
-```toml
-[dependencies]
-passkey-auth = "0.1"
-```
-
-MSRV: **Rust 1.85** (edition 2024).
 
 ## Usage
 
