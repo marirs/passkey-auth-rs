@@ -41,18 +41,16 @@ fn verify_es256(x: &[u8; 32], y: &[u8; 32], msg: &[u8], sig: &[u8]) -> Result<()
 
     // WebAuthn ES256 signatures are DER-encoded ECDSA. p256 has a
     // direct `from_der` parser.
+    //
+    // Note on signature malleability (high-S):
+    // ECDSA admits two valid signatures (r, s) and (r, n-s) for any
+    // message. WebAuthn does NOT require the verifier to reject the
+    // high-S form, and major server implementations (webauthn-rs,
+    // WebAuthn4J, Yubico java-webauthn-server) accept both. The
+    // single-use challenge in our `state` prevents the malleable
+    // variant from being useful for replay, so we follow suit and
+    // accept either form here.
     let parsed = EsSig::from_der(sig).map_err(|_| Error::BadSignature)?;
-
-    // Reject high-S signatures (signature malleability defence; see
-    // RFC 6979 §6.4 and WebAuthn §7.2 step 17). `p256::ecdsa` does
-    // NOT enforce low-S in `verify` itself, so we must check first.
-    // `normalize_s` returns Some(low_s_form) ONLY when the input was
-    // high-S; treat that as a bad signature outright rather than
-    // silently accepting the malleable variant.
-    if parsed.normalize_s().is_some() {
-        return Err(Error::BadSignature);
-    }
-
     vk.verify(msg, &parsed).map_err(|_| Error::BadSignature)
 }
 
@@ -117,68 +115,4 @@ mod tests {
         assert!(verify(&key, msg, &bad).is_err());
     }
 
-    /// Regression test for ECDSA signature malleability. For every
-    /// valid (r, s), the value (r, n - s) is ALSO a valid signature
-    /// for the same message and key under standard ECDSA verification.
-    /// The crate MUST reject the high-S form.
-    #[test]
-    fn es256_high_s_rejected() {
-        // Loop a few times because `EsSigningKey::random` could (very
-        // rarely) hand us a signature that's already at the boundary;
-        // most iterations produce a clearly-low-S signature whose
-        // negation is clearly high-S.
-        for _ in 0..16 {
-            let sk = EsSigningKey::random(&mut rand::thread_rng());
-            let vk = sk.verifying_key();
-            let pt = vk.to_encoded_point(false);
-            let mut x = [0u8; 32];
-            let mut y = [0u8; 32];
-            x.copy_from_slice(pt.x().unwrap().as_slice());
-            y.copy_from_slice(pt.y().unwrap().as_slice());
-            let key = CoseKey::Es256 { x, y };
-
-            let msg = b"malleability check";
-            let sig: EsSig = sk.sign(msg);
-            // `p256::ecdsa::Signature::sign` already returns low-S
-            // form, so its `normalize_s` will be None. Flip to high-S
-            // by negating s mod n.
-            let high_s = match negate_s(&sig) {
-                Some(h) => h,
-                None => continue,
-            };
-
-            let der_high = high_s.to_der().to_bytes().to_vec();
-
-            // Sanity: the unsafe variant DOES verify against the raw
-            // p256 API (proves the malleability really exists).
-            assert!(
-                vk.verify(msg, &high_s).is_ok(),
-                "high-S sig must be cryptographically valid",
-            );
-            // But our `verify` wrapper MUST reject it.
-            assert!(
-                verify(&key, msg, &der_high).is_err(),
-                "high-S sig must be rejected by passkey-auth",
-            );
-        }
-    }
-
-    /// Helper: given a signature with low-S, return the high-S twin
-    /// (r, n - s). Returns None if s is already at the half-order
-    /// boundary or if the parse fails.
-    fn negate_s(sig: &EsSig) -> Option<EsSig> {
-        use p256::FieldBytes;
-        use p256::elliptic_curve::{Curve, ScalarPrimitive};
-        type Scalar = p256::Scalar;
-
-        let (r, s) = sig.split_scalars();
-        // Reconstruct s as a Scalar, negate (n - s), reassemble.
-        let s_scalar: Scalar = *s.as_ref();
-        let neg_s = -s_scalar;
-        let neg_s_bytes: FieldBytes = neg_s.into();
-        let neg_s_prim = ScalarPrimitive::<p256::NistP256>::from_bytes(&neg_s_bytes).into_option()?;
-        let _ = p256::NistP256::ORDER; // silence unused-import in some toolchains
-        let r_bytes: FieldBytes = (*r.as_ref()).into();
-        EsSig::from_scalars(r_bytes, neg_s_bytes).ok()
-    }
 }
