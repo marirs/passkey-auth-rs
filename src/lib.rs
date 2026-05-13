@@ -40,7 +40,7 @@ mod crypto;
 pub mod error;
 mod types;
 
-pub use ceremony::Webauthn;
+pub use ceremony::{Attachment, Webauthn};
 pub use error::{Error, Result};
 pub use types::{
     AuthSuccess, AuthenticationChallenge, AuthenticationResponse, AuthenticationState, Challenge,

@@ -18,6 +18,40 @@ use crate::types::{
 
 const CEREMONY_TIMEOUT_MS: u32 = 60_000;
 
+/// Which class of authenticator the relying party wants to use.
+///
+/// This becomes the `authenticatorSelection.authenticatorAttachment`
+/// field in the registration challenge - a hint to the browser about
+/// which authenticators to surface to the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Attachment {
+    /// Built-in authenticators only: Touch ID, Windows Hello,
+    /// Android biometrics, ChromeOS, iCloud Keychain. The Gmail /
+    /// iCloud "synced passkey" flow lives here. **Default.**
+    Platform,
+    /// Roaming / removable authenticators: USB Yubikeys, NFC, BLE
+    /// security keys. Use this for "enterprise hardware key only"
+    /// deployments.
+    CrossPlatform,
+    /// No preference - the browser offers both platform and roaming
+    /// authenticators and lets the user pick. Use this when you want
+    /// to support hardware keys AND platform authenticators
+    /// simultaneously (e.g. "any passkey works").
+    Any,
+}
+
+impl Attachment {
+    /// String that goes on the wire, or `None` to omit the field
+    /// entirely (which is how WebAuthn signals "no preference").
+    fn as_token(self) -> Option<&'static str> {
+        match self {
+            Self::Platform => Some("platform"),
+            Self::CrossPlatform => Some("cross-platform"),
+            Self::Any => None,
+        }
+    }
+}
+
 /// The relying-party-side WebAuthn façade. Construct once at boot and
 /// re-use for every ceremony. Cheap to clone; carries only `String`s
 /// internally.
@@ -32,6 +66,10 @@ pub struct Webauthn {
     /// almost always wants - the user has to prove identity (Touch
     /// ID, biometric, PIN), not just presence (any button press).
     require_uv: bool,
+    /// Which authenticator class to ask the browser for at
+    /// registration time. Does NOT affect authentication - by then
+    /// the user already has a specific credential.
+    attachment: Attachment,
 }
 
 impl Webauthn {
@@ -49,6 +87,7 @@ impl Webauthn {
             rp_name: rp_name.to_owned(),
             origin: origin.to_owned(),
             require_uv: false,
+            attachment: Attachment::Platform,
         }
     }
 
@@ -64,6 +103,22 @@ impl Webauthn {
     #[must_use]
     pub fn require_user_verification(mut self, require: bool) -> Self {
         self.require_uv = require;
+        self
+    }
+
+    /// Builder method: which class of authenticator to request at
+    /// registration time. Defaults to [`Attachment::Platform`] (the
+    /// built-in biometric / cloud-keychain flow, like Gmail).
+    ///
+    /// Set to [`Attachment::CrossPlatform`] for hardware-key-only
+    /// deployments, or [`Attachment::Any`] to let the user pick
+    /// between a built-in passkey and a hardware key.
+    ///
+    /// Does not affect authentication - by the time the user is
+    /// asserting, they have already chosen which credential to use.
+    #[must_use]
+    pub fn authenticator_attachment(mut self, attachment: Attachment) -> Self {
+        self.attachment = attachment;
         self
     }
 
@@ -135,7 +190,7 @@ impl Webauthn {
             exclude_credentials: exclude,
             timeout: CEREMONY_TIMEOUT_MS,
             authenticator_selection: AuthenticatorSelection {
-                authenticator_attachment: Some("platform"),
+                authenticator_attachment: self.attachment.as_token(),
                 resident_key: Some("preferred"),
                 user_verification: self.uv_token(),
             },
@@ -361,4 +416,45 @@ fn sha256_32(data: &[u8]) -> [u8; 32] {
     let mut a = [0u8; 32];
     a.copy_from_slice(&out);
     a
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attachment_tokens() {
+        assert_eq!(Attachment::Platform.as_token(), Some("platform"));
+        assert_eq!(
+            Attachment::CrossPlatform.as_token(),
+            Some("cross-platform"),
+        );
+        assert_eq!(Attachment::Any.as_token(), None);
+    }
+
+    #[test]
+    fn challenge_reflects_attachment_builder() {
+        let wa_platform = Webauthn::new("example.com", "Example", "https://example.com");
+        let (chal, _) = wa_platform.start_registration(b"u", "u", "U", &[]);
+        assert_eq!(
+            chal.authenticator_selection.authenticator_attachment,
+            Some("platform"),
+        );
+
+        let wa_any = Webauthn::new("example.com", "Example", "https://example.com")
+            .authenticator_attachment(Attachment::Any);
+        let (chal, _) = wa_any.start_registration(b"u", "u", "U", &[]);
+        assert_eq!(
+            chal.authenticator_selection.authenticator_attachment,
+            None,
+        );
+
+        let wa_cross = Webauthn::new("example.com", "Example", "https://example.com")
+            .authenticator_attachment(Attachment::CrossPlatform);
+        let (chal, _) = wa_cross.start_registration(b"u", "u", "U", &[]);
+        assert_eq!(
+            chal.authenticator_selection.authenticator_attachment,
+            Some("cross-platform"),
+        );
+    }
 }
