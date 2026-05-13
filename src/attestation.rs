@@ -292,7 +292,9 @@ fn verify_fido_u2f(
                             match c {
                                 CborValue::Bytes(b) => out.push(b.clone()),
                                 _ => {
-                                    return Err(Error::Cbor("fido-u2f: x5c entry not bytes".into()));
+                                    return Err(Error::Cbor(
+                                        "fido-u2f: x5c entry not bytes".into(),
+                                    ));
                                 }
                             }
                         }
