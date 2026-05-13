@@ -78,12 +78,23 @@ impl AttestationCert {
         p256_pubkey_sec1.copy_from_slice(pk_bits);
 
         // ---- AAGUID extension (optional) ----------------------------
-        let aaguid = cert
+        //
+        // Presence of the extension is optional per WebAuthn-3. BUT
+        // when present it MUST parse correctly - we do NOT silently
+        // treat a malformed AAGUID extension as "absent" because that
+        // would let a malicious cert bypass the
+        //   leaf_aaguid == authData_aaguid
+        // check in verify_packed by intentionally garbling the inner
+        // OCTET STRING.
+        let aaguid_ext = cert
             .tbs_certificate
             .extensions
             .as_ref()
-            .and_then(|exts| exts.iter().find(|e| e.extn_id == OID_FIDO_AAGUID))
-            .and_then(|ext| parse_aaguid_octet_string(ext.extn_value.as_bytes()).ok());
+            .and_then(|exts| exts.iter().find(|e| e.extn_id == OID_FIDO_AAGUID));
+        let aaguid = match aaguid_ext {
+            Some(ext) => Some(parse_aaguid_octet_string(ext.extn_value.as_bytes())?),
+            None => None,
+        };
 
         Ok(Self {
             p256_pubkey_sec1,

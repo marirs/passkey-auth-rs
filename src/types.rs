@@ -306,10 +306,31 @@ pub struct AuthenticationChallenge {
 /// stores this server-side keyed by however they like (session cookie,
 /// user id, in-memory map). Treat as secret-ish: contains the
 /// challenge we issued.
+///
+/// The state carries a `created_at` (Unix seconds, UTC) so callers can
+/// reject stale ceremonies without needing their own out-of-band TTL.
+/// `finish_*` ALSO enforces a hard ceiling (see
+/// `Webauthn::CEREMONY_MAX_AGE_SECS`) so a forgetful caller cannot
+/// accept a registration response from yesterday.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistrationState {
     pub challenge: Challenge,
     pub user_id: Vec<u8>,
+    /// Unix timestamp (seconds, UTC) when `start_registration` was
+    /// called. Stable serialization-friendly form.
+    #[serde(default)]
+    pub created_at: u64,
+}
+
+impl RegistrationState {
+    /// `true` if more than `max_age_secs` seconds have elapsed since
+    /// the ceremony was started. Cheap helper for callers that want
+    /// to evict stale state from their session store proactively;
+    /// `finish_registration` ALSO enforces its own ceiling.
+    #[must_use]
+    pub fn is_expired(&self, max_age_secs: u64) -> bool {
+        now_secs().saturating_sub(self.created_at) > max_age_secs
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -318,6 +339,28 @@ pub struct AuthenticationState {
     /// Credentials the browser was allowed to use, so finish_* can
     /// verify the asserted credential id is one of them.
     pub allow_credentials: Vec<CredentialId>,
+    /// Unix timestamp (seconds, UTC) when `start_authentication` was
+    /// called.
+    #[serde(default)]
+    pub created_at: u64,
+}
+
+impl AuthenticationState {
+    /// See [`RegistrationState::is_expired`].
+    #[must_use]
+    pub fn is_expired(&self, max_age_secs: u64) -> bool {
+        now_secs().saturating_sub(self.created_at) > max_age_secs
+    }
+}
+
+/// Current Unix time in seconds. Used to stamp ceremony states.
+/// Saturates to 0 if the system clock is before the Unix epoch (which
+/// will never happen on a sane host) so the helpers never panic.
+pub(crate) fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 // ---------- Outcomes ----------------------------------------------------

@@ -38,7 +38,7 @@ use axum::{
 use rusqlite::{Connection, params};
 use serde::Serialize;
 use tokio::sync::Mutex;
-use tower_http::cors::CorsLayer;
+// See axum_server.rs for why we do NOT install CorsLayer::permissive().
 use tower_http::services::ServeDir;
 
 use passkey_auth::{
@@ -66,7 +66,11 @@ CREATE TABLE IF NOT EXISTS credentials (
     public_key_cose BLOB NOT NULL,
     counter         INTEGER NOT NULL,
     transports      TEXT NOT NULL,
-    aaguid          BLOB NOT NULL,
+    -- AAGUID is always 16 bytes per the WebAuthn spec. The CHECK
+    -- constraint catches schema drift / manual edits at write time so
+    -- the row_to_credential reader does not need to guess what a
+    -- short value means.
+    aaguid          BLOB NOT NULL CHECK (length(aaguid) = 16),
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
 "#;
@@ -161,10 +165,27 @@ fn row_to_credential(row: &rusqlite::Row<'_>) -> rusqlite::Result<PasskeyCredent
     let counter: u32 = row.get(2)?;
     let transports_csv: String = row.get(3)?;
     let aaguid_vec: Vec<u8> = row.get(4)?;
-    let mut aaguid = [0u8; 16];
-    if aaguid_vec.len() == 16 {
-        aaguid.copy_from_slice(&aaguid_vec);
+
+    // The aaguid column is always 16 bytes. A row with a different
+    // length means schema drift or a manually-edited DB - error rather
+    // than silently zeroing it out, because [0u8; 16] is ALSO the
+    // legitimate "no attestation, real AAGUID is all zeros" value
+    // and conflating the two would let a corrupted row impersonate a
+    // valid no-attestation credential.
+    if aaguid_vec.len() != 16 {
+        return Err(rusqlite::Error::FromSqlConversionFailure(
+            4,
+            rusqlite::types::Type::Blob,
+            format!(
+                "aaguid column wrong length: expected 16 bytes, got {}",
+                aaguid_vec.len()
+            )
+            .into(),
+        ));
     }
+    let mut aaguid = [0u8; 16];
+    aaguid.copy_from_slice(&aaguid_vec);
+
     Ok(PasskeyCredential {
         id: CredentialId(id),
         public_key_cose: CosePublicKey(pkc),
@@ -417,7 +438,6 @@ async fn main() {
         .route("/authenticate/finish", post(authenticate_finish))
         // Reuses the single-user HTML from the original axum_server example.
         .fallback_service(ServeDir::new("examples/static"))
-        .layer(CorsLayer::permissive())
         .with_state(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));

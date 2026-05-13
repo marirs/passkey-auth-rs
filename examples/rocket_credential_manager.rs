@@ -156,6 +156,12 @@ fn authenticate_start(
 }
 
 /// POST /authenticate/finish - verify, set signed_in on the session.
+///
+/// On success: ROTATE the session id (drop the pre-auth sid, mint a
+/// fresh one, attach it to the response via Set-Cookie). Defence
+/// against session-fixation: if an attacker pre-set a known sid in
+/// the victim's browser, that sid is now dead and the signed-in
+/// session lives under a value the attacker never saw.
 #[post("/authenticate/finish", data = "<body>")]
 fn authenticate_finish(
     state: &State<AppState>,
@@ -180,13 +186,26 @@ fn authenticate_finish(
     stored.counter = outcome.new_counter;
     drop(user);
 
-    state
-        .sessions
-        .lock()
-        .unwrap()
-        .entry(sid)
-        .or_default()
-        .signed_in = true;
+    // Rotate: drop the old session entry, create a new signed-in
+    // session keyed by a fresh sid, and overwrite the cookie.
+    let new_sid = hex_random(16);
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        sessions.remove(&sid);
+        sessions.insert(
+            new_sid.clone(),
+            Session {
+                signed_in: true,
+                ..Session::default()
+            },
+        );
+    }
+    cookies.add(
+        Cookie::build(("sid", new_sid))
+            .http_only(true)
+            .same_site(rocket::http::SameSite::Lax)
+            .path("/"),
+    );
 
     Ok(Json(AuthFinishReply {
         ok: true,

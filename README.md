@@ -33,7 +33,7 @@ rustcrypto end-to-end:
 | Ed25519 verify         | [`ed25519-dalek`](https://crates.io/crates/ed25519-dalek)      | openssl                  |
 | SHA-256                | [`sha2`](https://crates.io/crates/sha2)                        | openssl                  |
 | CBOR                   | [`ciborium`](https://crates.io/crates/ciborium)                | serde_cbor (deprecated)  |
-| Attestation cert chain | Not implemented (none + packed-self only)                      | full X.509 + FIDO MDS    |
+| Attestation chain      | x5c sig verified, root NOT validated                           | full X.509 + FIDO MDS    |
 
 ## Scope
 

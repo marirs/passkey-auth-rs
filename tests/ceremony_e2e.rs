@@ -316,6 +316,35 @@ fn wrong_challenge_rejected() {
     assert!(matches!(err, Error::ChallengeMismatch), "got {err:?}");
 }
 
+#[test]
+fn expired_ceremony_rejected() {
+    let wa = Webauthn::new(RP_ID, "Example", ORIGIN);
+    let mut auth = FakeAuthenticator::new();
+    let credential = do_register(&wa, &mut auth);
+
+    // Build a valid assertion, then back-date the state's
+    // `created_at` to 10 minutes ago to simulate a caller that
+    // forgot to TTL their session store.
+    let (chal, mut state) = wa.start_authentication(std::slice::from_ref(&credential.id));
+    state.created_at = state.created_at.saturating_sub(600); // 10 minutes ago
+
+    let auth_data = auth.auth_data_authenticate(None);
+    let (cdj_raw, cdj_b64) = client_data("webauthn.get", &chal.challenge, ORIGIN);
+    let sig = auth.sign_assertion(&auth_data, &cdj_raw);
+    let response = AuthenticationResponse {
+        id: B64URL.encode(&auth.credential_id),
+        authenticator_data: B64URL.encode(&auth_data),
+        signature: B64URL.encode(&sig),
+        client_data_json: cdj_b64,
+        user_handle: None,
+    };
+
+    let err = wa
+        .finish_authentication(&state, &response, &credential)
+        .unwrap_err();
+    assert!(matches!(err, Error::CeremonyExpired { .. }), "got {err:?}");
+}
+
 // ---------- helper ---------------------------------------------------------
 
 fn do_register(wa: &Webauthn, auth: &mut FakeAuthenticator) -> passkey_auth::PasskeyCredential {

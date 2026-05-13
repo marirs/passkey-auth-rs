@@ -32,7 +32,11 @@ use axum::{
 };
 use serde::Serialize;
 use tokio::sync::Mutex;
-use tower_http::cors::CorsLayer;
+// No CORS layer: every endpoint is same-origin with the static HTML.
+// `CorsLayer::permissive()` was a defensive copy from internet
+// examples; for a passkey server it is exactly the wrong default
+// (allows credentialed cross-origin requests, neutering the browser
+// origin check on the /whoami and /authenticate endpoints).
 use tower_http::services::ServeDir;
 
 use passkey_auth::{
@@ -312,7 +316,6 @@ async fn main() {
         // Serve everything under examples/static/ at the root. Index.html
         // is the demo UI.
         .fallback_service(ServeDir::new("examples/static"))
-        .layer(CorsLayer::permissive())
         .with_state(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));

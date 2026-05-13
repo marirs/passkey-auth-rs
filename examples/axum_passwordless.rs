@@ -44,7 +44,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
-use tower_http::cors::CorsLayer;
+// See axum_server.rs for why we do NOT install CorsLayer::permissive().
 use tower_http::services::ServeDir;
 
 use passkey_auth::{
@@ -194,11 +194,18 @@ async fn authenticate_start(
 
 /// POST /authenticate/finish - verify the assertion. Identifies the
 /// user by the response's userHandle.
+///
+/// On success: ROTATE the session id (mint a fresh sid, move the
+/// session record to the new key, hand the new cookie back to the
+/// browser). This is defence against session-fixation - if an
+/// attacker tricked the victim into using an attacker-known pre-auth
+/// sid, that sid is now dead and the victim's signed-in state lives
+/// under a value the attacker never saw.
 async fn authenticate_finish(
     State(state): State<Arc<AppState>>,
     cookies: HeaderMap,
     Json(body): Json<AuthenticationResponse>,
-) -> Result<Json<AuthFinishReply>, AppError> {
+) -> Result<Response, AppError> {
     let sid = sid_from_cookies(&cookies).ok_or(AppError::BadRequest("missing sid cookie"))?;
     let auth_state = state
         .sessions
@@ -243,20 +250,31 @@ async fn authenticate_finish(
     stored.counter = outcome.new_counter;
     drop(users);
 
-    // Mark the session as signed-in.
-    state
-        .sessions
-        .lock()
-        .await
-        .entry(sid)
-        .or_default()
-        .signed_in_as = Some(username.clone());
+    // ── Session rotation ────────────────────────────────────────────
+    // Drop the pre-auth session record entirely and mint a fresh sid
+    // for the now-signed-in state. The attacker (if any) holding the
+    // old sid is left with a dead cookie.
+    let new_sid = hex_random(16);
+    {
+        let mut sessions = state.sessions.lock().await;
+        sessions.remove(&sid);
+        sessions.insert(
+            new_sid.clone(),
+            Session {
+                signed_in_as: Some(username.clone()),
+                ..Session::default()
+            },
+        );
+    }
 
-    Ok(Json(AuthFinishReply {
-        ok: true,
-        username,
-        user_verified: outcome.user_verified,
-    }))
+    Ok(json_with_sid(
+        &AuthFinishReply {
+            ok: true,
+            username,
+            user_verified: outcome.user_verified,
+        },
+        &new_sid,
+    ))
 }
 
 #[derive(Serialize)]
@@ -378,7 +396,6 @@ async fn main() {
         .route("/authenticate/finish", post(authenticate_finish))
         .route("/whoami", axum::routing::get(whoami))
         .fallback_service(ServeDir::new("examples/static/passwordless"))
-        .layer(CorsLayer::permissive())
         .with_state(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));

@@ -13,10 +13,18 @@ use crate::types::{
     AuthSuccess, AuthenticationChallenge, AuthenticationResponse, AuthenticationState,
     AuthenticatorSelection, Challenge, CosePublicKey, CredentialDescriptor, CredentialId,
     PasskeyCredential, PubKeyCredParam, RegistrationChallenge, RegistrationResponse,
-    RegistrationState, RpId, RpInfo, UserInfo, b64url_decode,
+    RegistrationState, RpId, RpInfo, UserInfo, b64url_decode, now_secs,
 };
 
 const CEREMONY_TIMEOUT_MS: u32 = 60_000;
+
+/// Hard ceiling on how old a ceremony state may be when `finish_*` is
+/// called. Slightly larger than `CEREMONY_TIMEOUT_MS` (which is what
+/// we ask the browser to honour) so a slow round-trip does not trigger
+/// false rejections. The point is defence-in-depth: even a caller who
+/// forgets to TTL their session store cannot accept a registration
+/// response from yesterday.
+pub(crate) const CEREMONY_MAX_AGE_SECS: u64 = 300;
 
 /// Which class of authenticator the relying party wants to use.
 ///
@@ -77,11 +85,29 @@ impl Webauthn {
     /// the full scheme+host (e.g. `"https://example.com"`); it must
     /// match exactly what the browser puts into `clientDataJSON.origin`.
     ///
+    /// # Panics
+    ///
+    /// Panics in debug builds if `rp_id` contains a scheme separator
+    /// (`://`), a `/`, or a `:` — these are tell-tale signs the caller
+    /// passed an origin or URL by mistake. Release builds accept the
+    /// input verbatim (consistent with [`RpId::new`]) so a misconfigured
+    /// production deployment fails LOUDLY at the first ceremony rather
+    /// than silently issuing challenges no browser will satisfy.
+    ///
+    /// Use [`RpId::try_from_url`] if you have a URL/origin string and
+    /// want a graceful conversion.
+    ///
     /// Defaults to NOT requiring user verification on the server side;
     /// the JSON challenges still ask for `userVerification: "preferred"`.
     /// Call [`Self::require_user_verification`] to flip the server
     /// check to strict before using it in production.
     pub fn new(rp_id: &str, rp_name: &str, origin: &str) -> Self {
+        debug_assert!(
+            !rp_id.contains("://") && !rp_id.contains('/') && !rp_id.contains(':'),
+            "Webauthn::new: rp_id ({rp_id:?}) looks like a URL/origin, not a bare domain. \
+             Pass just the host (e.g. \"example.com\"), or use RpId::try_from_url to extract \
+             the host from an origin string.",
+        );
         Self {
             rp_id: RpId::new(rp_id),
             rp_name: rp_name.to_owned(),
@@ -199,6 +225,7 @@ impl Webauthn {
         let state = RegistrationState {
             challenge,
             user_id: user_id.to_vec(),
+            created_at: now_secs(),
         };
         (chal, state)
     }
@@ -210,6 +237,12 @@ impl Webauthn {
         state: &RegistrationState,
         response: &RegistrationResponse,
     ) -> Result<PasskeyCredential> {
+        // 0. Reject ceremonies older than the hard ceiling. Defence
+        // in depth - the caller's session store should TTL these
+        // out already, but a forgetful caller cannot do worse than
+        // 5 minutes of replay window.
+        check_not_expired(state.created_at)?;
+
         // 1. Validate clientDataJSON.
         let cdj_raw = client_data::validate(
             &response.client_data_json,
@@ -223,7 +256,10 @@ impl Webauthn {
         let att_bytes = b64url_decode(&response.attestation_object)?;
         let att = ParsedAttestation::parse(&att_bytes)?;
 
-        // 3. rpIdHash check.
+        // 3. rpIdHash check. Note: non-constant-time `!=` is fine here
+        // because both sides are public (SHA-256 of the RP ID) and an
+        // attacker who could probe timing learns only the RP ID, which
+        // they already know from the same TLS handshake.
         let want_rp_hash = sha256_32(self.rp_id.as_str().as_bytes());
         if att.auth_data.rp_id_hash != want_rp_hash {
             return Err(Error::RpIdHashMismatch);
@@ -330,18 +366,41 @@ impl Webauthn {
         let state = AuthenticationState {
             challenge,
             allow_credentials: ids.to_vec(),
+            created_at: now_secs(),
         };
         (chal, state)
     }
 
     /// Verify the assertion. `stored` is the credential the caller
     /// looked up by `response.id`.
+    ///
+    /// # Caller contract (security-critical)
+    ///
+    /// **The caller MUST ensure that `stored` belongs to the user
+    /// being authenticated** — typically by looking it up via
+    /// `response.id` scoped to a known user record, NOT by globally
+    /// searching every credential in the database.
+    ///
+    /// In a multi-tenant deployment, a naive lookup like
+    /// `credentials.find(|c| c.id == response.id)` is wrong: two users
+    /// COULD (in pathological cases) end up with the same credential
+    /// id and the wrong user would be authenticated. Real WebAuthn
+    /// credential ids are large random byte strings so this is
+    /// vanishingly unlikely in practice — but the crate cannot enforce
+    /// the right scoping for you. For discoverable-credential
+    /// (passwordless) flows, look up by `response.user_handle` first,
+    /// then verify `response.id` matches the user's stored credentials.
+    /// See [`examples/axum_passwordless.rs`](https://github.com/marirs/passkey-auth/blob/main/examples/axum_passwordless.rs)
+    /// for the recommended pattern.
     pub fn finish_authentication(
         &self,
         state: &AuthenticationState,
         response: &AuthenticationResponse,
         stored: &PasskeyCredential,
     ) -> Result<AuthSuccess> {
+        // 0. Reject stale ceremonies (see finish_registration).
+        check_not_expired(state.created_at)?;
+
         // 1. The asserted credential ID must be one of the ones we
         // told the browser was acceptable (if we gave a non-empty
         // allow list), and it must be the stored one.
@@ -416,6 +475,26 @@ fn sha256_32(data: &[u8]) -> [u8; 32] {
     let mut a = [0u8; 32];
     a.copy_from_slice(&out);
     a
+}
+
+/// Hard ceiling on ceremony age. `created_at` of 0 is treated as
+/// "unknown / pre-fix state" and skipped to keep the helper backwards
+/// compatible with persisted RegistrationState / AuthenticationState
+/// blobs that predate the field (serde `#[serde(default)]` gives them
+/// 0). Real ceremony states get a real timestamp.
+fn check_not_expired(created_at: u64) -> Result<()> {
+    if created_at == 0 {
+        return Ok(());
+    }
+    let now = now_secs();
+    let age = now.saturating_sub(created_at);
+    if age > CEREMONY_MAX_AGE_SECS {
+        return Err(Error::CeremonyExpired {
+            age_secs: age,
+            max_secs: CEREMONY_MAX_AGE_SECS,
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -55,6 +55,38 @@ impl AsExtension for FidoAaguid {
     }
 }
 
+/// Deliberately malformed AAGUID extension. Encodes the wrong shape -
+/// we use this in a regression test for the "malformed extension is
+/// rejected" path. The bytes here are NOT a valid DER OCTET STRING of
+/// 16 bytes; the inner tag/length is junk.
+#[derive(Clone, Debug)]
+struct MalformedAaguid;
+
+impl AssociatedOid for MalformedAaguid {
+    const OID: x509_cert::der::oid::ObjectIdentifier =
+        x509_cert::der::oid::ObjectIdentifier::new_unwrap("1.3.6.1.4.1.45724.1.1.4");
+}
+
+impl x509_cert::der::Encode for MalformedAaguid {
+    fn encoded_len(&self) -> x509_cert::der::Result<x509_cert::der::Length> {
+        // 7 bytes of attacker-chosen junk inside the outer OCTET STRING.
+        OctetString::new(vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x11, 0x22])
+            .unwrap()
+            .encoded_len()
+    }
+    fn encode(&self, encoder: &mut impl x509_cert::der::Writer) -> x509_cert::der::Result<()> {
+        OctetString::new(vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x11, 0x22])
+            .unwrap()
+            .encode(encoder)
+    }
+}
+
+impl AsExtension for MalformedAaguid {
+    fn critical(&self, _subject: &Name, _exts: &[Extension]) -> bool {
+        false
+    }
+}
+
 use passkey_auth::{RegistrationResponse, Webauthn};
 
 const RP_ID: &str = "example.com";
@@ -69,11 +101,23 @@ struct CertBundle {
     cert_der: Vec<u8>,
 }
 
+/// Which AAGUID extension (if any) to embed in the test cert.
+#[derive(Clone, Copy)]
+enum AaguidExt {
+    /// No FIDO AAGUID extension on the cert.
+    None,
+    /// Well-formed extension carrying the given 16 bytes.
+    Valid([u8; 16]),
+    /// Extension OID is present but the inner OCTET STRING is junk.
+    /// Used to test the "must not silently swallow malformed extensions"
+    /// path.
+    Malformed,
+}
+
 impl CertBundle {
-    /// Mint a fresh self-signed leaf cert. If `aaguid` is `Some`, embed
-    /// the FIDO AAGUID extension (OID 1.3.6.1.4.1.45724.1.1.4) so we
-    /// can test the AAGUID-correlation path.
-    fn new(aaguid: Option<[u8; 16]>) -> Self {
+    /// Mint a fresh self-signed leaf cert with the requested AAGUID
+    /// extension shape.
+    fn new(aaguid: AaguidExt) -> Self {
         let signing_key = SigningKey::random(&mut rand::thread_rng());
         let verifying_key = signing_key.verifying_key();
 
@@ -113,10 +157,18 @@ impl CertBundle {
         // FidoAaguid handles the double OCTET STRING wrapping the spec
         // requires (outer wrap done by AsExtension::to_extension, inner
         // wrap done by our Encode impl).
-        if let Some(aaguid) = aaguid {
-            builder
-                .add_extension(&FidoAaguid(aaguid))
-                .expect("add aaguid ext");
+        match aaguid {
+            AaguidExt::None => {}
+            AaguidExt::Valid(value) => {
+                builder
+                    .add_extension(&FidoAaguid(value))
+                    .expect("add aaguid ext");
+            }
+            AaguidExt::Malformed => {
+                builder
+                    .add_extension(&MalformedAaguid)
+                    .expect("add malformed aaguid ext");
+            }
         }
 
         let cert: x509_cert::Certificate = builder
@@ -228,7 +280,7 @@ fn client_data(kind: &str, challenge_b64: &str, origin: &str) -> (Vec<u8>, Strin
 #[test]
 fn packed_x5c_happy_path() {
     let aaguid: [u8; 16] = *b"yubico-test-0001";
-    let cert = CertBundle::new(Some(aaguid));
+    let cert = CertBundle::new(AaguidExt::Valid(aaguid));
     let cred = CredKey::new();
     let cred_id: &[u8] = b"cred-packed-0001";
     let cose_pk = cred.cose_pubkey();
@@ -290,7 +342,7 @@ fn packed_x5c_happy_path() {
 fn packed_x5c_aaguid_mismatch_rejected() {
     let cert_aaguid: [u8; 16] = *b"yubico-test-0001";
     let auth_aaguid: [u8; 16] = *b"different-aaguid";
-    let cert = CertBundle::new(Some(cert_aaguid));
+    let cert = CertBundle::new(AaguidExt::Valid(cert_aaguid));
     let cred = CredKey::new();
     let cred_id: &[u8] = b"cred-packed-0002";
     let cose_pk = cred.cose_pubkey();
@@ -350,8 +402,8 @@ fn packed_x5c_aaguid_mismatch_rejected() {
 #[test]
 fn packed_x5c_bad_signature_rejected() {
     let aaguid: [u8; 16] = *b"yubico-test-0001";
-    let cert = CertBundle::new(Some(aaguid));
-    let _wrong_cert = CertBundle::new(Some(aaguid)); // different key
+    let cert = CertBundle::new(AaguidExt::Valid(aaguid));
+    let _wrong_cert = CertBundle::new(AaguidExt::Valid(aaguid)); // different key
     let cred = CredKey::new();
     let cred_id: &[u8] = b"cred-packed-0003";
     let cose_pk = cred.cose_pubkey();
@@ -413,7 +465,7 @@ fn packed_x5c_bad_signature_rejected() {
 
 #[test]
 fn fido_u2f_happy_path() {
-    let cert = CertBundle::new(None); // U2F format does NOT include AAGUID ext
+    let cert = CertBundle::new(AaguidExt::None); // U2F format does NOT include AAGUID ext
     let cred = CredKey::new();
     let cred_id: &[u8] = b"cred-u2f-0001";
     let cose_pk = cred.cose_pubkey();
@@ -475,7 +527,7 @@ fn fido_u2f_happy_path() {
 
 #[test]
 fn fido_u2f_wrong_credential_pubkey_rejected() {
-    let cert = CertBundle::new(None);
+    let cert = CertBundle::new(AaguidExt::None);
     let real_cred = CredKey::new();
     let bogus_cred = CredKey::new(); // we'll sign the U2F pre-image with the bogus pubkey
     let cred_id: &[u8] = b"cred-u2f-0002";
@@ -530,4 +582,82 @@ fn fido_u2f_wrong_credential_pubkey_rejected() {
     };
 
     assert!(wa.finish_registration(&state, &response).is_err());
+}
+
+// ---------- regression test for malformed AAGUID extension ------------------
+
+/// Without the fix this catches, a cert containing an AAGUID extension
+/// whose inner OCTET STRING is junk would parse as "no AAGUID extension"
+/// and skip the cert-vs-authData AAGUID match check in verify_packed -
+/// letting a malicious cert claim ANY authData AAGUID despite carrying
+/// a contradictory one of its own.
+///
+/// The fix in src/x509.rs propagates the parse error instead of using
+/// `.ok()`. This test signs a packed attestation with a cert that
+/// carries the AAGUID extension OID but a deliberately-broken inner
+/// value, and asserts the registration is rejected outright rather
+/// than silently treated as if the extension were absent.
+#[test]
+fn packed_x5c_malformed_aaguid_rejected() {
+    let cert = CertBundle::new(AaguidExt::Malformed);
+    let cred = CredKey::new();
+    let cred_id: &[u8] = b"cred-malformed-aaguid";
+    let cose_pk = cred.cose_pubkey();
+    // authData carries SOME AAGUID. The malformed extension means we
+    // cannot tell if it matches; the parser must refuse rather than
+    // silently accept.
+    let auth_data = auth_data_register(RP_ID, *b"any-authd-aaguid", cred_id, &cose_pk);
+
+    let wa = Webauthn::new(RP_ID, "Example", ORIGIN);
+    let (chal, state) = wa.start_registration(b"u", "alice", "Alice", &[]);
+    let (cdj_raw, cdj_b64) = client_data("webauthn.create", &chal.challenge, ORIGIN);
+
+    let mut signed = Vec::with_capacity(auth_data.len() + 32);
+    signed.extend_from_slice(&auth_data);
+    signed.extend_from_slice(&Sha256::digest(&cdj_raw));
+    let sig: EsSig = cert.signing_key.sign(&signed);
+    let sig_der = sig.to_der().to_bytes().to_vec();
+
+    let att_obj = CborValue::Map(vec![
+        (
+            CborValue::Text("fmt".into()),
+            CborValue::Text("packed".into()),
+        ),
+        (
+            CborValue::Text("attStmt".into()),
+            CborValue::Map(vec![
+                (
+                    CborValue::Text("alg".into()),
+                    CborValue::Integer((-7).into()),
+                ),
+                (CborValue::Text("sig".into()), CborValue::Bytes(sig_der)),
+                (
+                    CborValue::Text("x5c".into()),
+                    CborValue::Array(vec![CborValue::Bytes(cert.cert_der.clone())]),
+                ),
+            ]),
+        ),
+        (
+            CborValue::Text("authData".into()),
+            CborValue::Bytes(auth_data),
+        ),
+    ]);
+    let mut att_bytes = Vec::new();
+    ciborium::ser::into_writer(&att_obj, &mut att_bytes).unwrap();
+
+    let response = RegistrationResponse {
+        id: B64URL.encode(cred_id),
+        transports: vec![],
+        attestation_object: B64URL.encode(&att_bytes),
+        client_data_json: cdj_b64,
+    };
+
+    let err = wa
+        .finish_registration(&state, &response)
+        .expect_err("malformed AAGUID extension must reject");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("AAGUID") || msg.contains("malformed"),
+        "expected malformed/AAGUID error, got: {msg}",
+    );
 }

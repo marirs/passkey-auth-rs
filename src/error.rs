@@ -70,6 +70,13 @@ pub enum Error {
     #[error("counter went backwards (stored={stored}, new={new}): possible cloned credential")]
     CounterReplay { stored: u32, new: u32 },
 
+    /// The ceremony state handed to `finish_*` is older than the
+    /// allowed ceiling (default 5 minutes). Indicates the caller did
+    /// not TTL their session store, or the response came back after
+    /// the user walked away. Reject and restart the ceremony.
+    #[error("ceremony state expired ({age_secs} seconds old, max {max_secs})")]
+    CeremonyExpired { age_secs: u64, max_secs: u64 },
+
     /// Internal invariant violation (bug). Should never reach a user.
     #[error("internal: {0}")]
     Internal(&'static str),
