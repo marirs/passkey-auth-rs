@@ -26,22 +26,55 @@ pub struct Webauthn {
     rp_id: RpId,
     rp_name: String,
     origin: String,
+    /// When `true`, finish_registration and finish_authentication
+    /// fail with Error::UserNotVerified if the authenticator did not
+    /// set the UV flag. This is what a production passkey deployment
+    /// almost always wants - the user has to prove identity (Touch
+    /// ID, biometric, PIN), not just presence (any button press).
+    require_uv: bool,
 }
 
 impl Webauthn {
     /// `rp_id` is the bare domain (e.g. `"example.com"`). `origin` is
     /// the full scheme+host (e.g. `"https://example.com"`); it must
     /// match exactly what the browser puts into `clientDataJSON.origin`.
+    ///
+    /// Defaults to NOT requiring user verification on the server side;
+    /// the JSON challenges still ask for `userVerification: "preferred"`.
+    /// Call [`Self::require_user_verification`] to flip the server
+    /// check to strict before using it in production.
     pub fn new(rp_id: &str, rp_name: &str, origin: &str) -> Self {
         Self {
             rp_id: RpId::new(rp_id),
             rp_name: rp_name.to_owned(),
             origin: origin.to_owned(),
+            require_uv: false,
         }
+    }
+
+    /// Builder method: when set to `true`, the server REJECTS any
+    /// ceremony where the authenticator did not set the UV flag.
+    /// Recommended for any deployment where presence-only credentials
+    /// (e.g. a button press on a roaming key) should not count as
+    /// authentication.
+    ///
+    /// Also tightens the challenge sent to the browser to ask for
+    /// `userVerification: "required"`, so a compliant browser will
+    /// not even attempt a UV-less assertion.
+    #[must_use]
+    pub fn require_user_verification(mut self, require: bool) -> Self {
+        self.require_uv = require;
+        self
     }
 
     pub fn rp_id(&self) -> &str {
         self.rp_id.as_str()
+    }
+
+    /// The `userVerification` string we put into the challenge JSON.
+    /// Mirrors `require_uv`: "required" if strict, "preferred" otherwise.
+    fn uv_token(&self) -> &'static str {
+        if self.require_uv { "required" } else { "preferred" }
     }
 
     // ─── Registration ─────────────────────────────────────────────────
@@ -95,7 +128,7 @@ impl Webauthn {
             authenticator_selection: AuthenticatorSelection {
                 authenticator_attachment: Some("platform"),
                 resident_key: Some("preferred"),
-                user_verification: "preferred",
+                user_verification: self.uv_token(),
             },
             attestation: "none",
         };
@@ -132,10 +165,14 @@ impl Webauthn {
             return Err(Error::RpIdHashMismatch);
         }
 
-        // 4. User-present is mandatory for registration. UV is preferred
-        // but not required (some authenticators issue UP-only creds).
+        // 4. User-present is mandatory for registration. UV is gated
+        // by `require_uv` - opt-in strict mode for production passkey
+        // deployments where presence-only must not count.
         if !att.auth_data.user_present() {
             return Err(Error::UserNotPresent);
+        }
+        if self.require_uv && !att.auth_data.user_verified() {
+            return Err(Error::UserNotVerified);
         }
 
         // 5. AT flag MUST be set on registration; we need the attested
@@ -185,7 +222,7 @@ impl Webauthn {
             rp_id: self.rp_id.as_str().to_owned(),
             timeout: CEREMONY_TIMEOUT_MS,
             allow_credentials: descriptors,
-            user_verification: "preferred",
+            user_verification: self.uv_token(),
         };
         let state = AuthenticationState {
             challenge,
@@ -233,6 +270,9 @@ impl Webauthn {
         }
         if !ad.user_present() {
             return Err(Error::UserNotPresent);
+        }
+        if self.require_uv && !ad.user_verified() {
+            return Err(Error::UserNotVerified);
         }
 
         // 4. Verify the signature: signedMsg = authData || cdjHash.
