@@ -1,6 +1,6 @@
 [package]
 name        = "passkey-auth"
-version     = "0.1.1"
+version     = "0.1.2"
 edition     = "2024"
 rust-version = "1.85"
 license     = "MIT OR Apache-2.0"
@@ -38,6 +38,13 @@ thiserror     = "2"
 # URL parsing for origin checks.
 url           = "2"
 
+# X.509 parsing for the `packed` (with x5c) and `fido-u2f` attestation
+# formats. Pure-Rust, RustCrypto family - no openssl. We extract the
+# leaf cert's SubjectPublicKey and any AAGUID extension; we do NOT
+# validate the chain (see README scope note).
+x509-cert     = { version = "0.2", features = ["std"] }
+const-oid     = "0.9"
+
 [dev-dependencies]
 # Known-vector regression tests live under tests/.
 hex           = "0.4"
@@ -46,8 +53,15 @@ hex           = "0.4"
 base64        = "0.22"
 ciborium      = "0.2"
 ed25519-dalek = { version = "2", features = ["pkcs8", "rand_core"] }
-sha2          = "0.10"
+# `oid` feature so sha2 implements AssociatedOid - needed when the
+# x509-cert builder asks for the signature-algorithm identifier.
+sha2          = { version = "0.10", features = ["oid"] }
 rand          = "0.8"
+# Re-enable p256's pkcs8 + pem features in dev builds so SigningKey
+# implements SignatureAlgorithmIdentifier (required by x509-cert's
+# builder). Cargo merges this with the regular dep's feature set; the
+# library never imports anything PEM-related at runtime.
+p256          = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] }
 # The {axum,rocket}_server examples wire the crate into a real HTTP
 # server so you can register / authenticate a real passkey in your
 # browser.
@@ -55,6 +69,11 @@ axum          = "0.7"
 tokio         = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 tower-http    = { version = "0.6", features = ["fs", "cors"] }
 rocket        = { version = "0.5", features = ["json"] }
+
+# x509-cert with the `builder` feature so attestation tests can mint
+# a self-signed P-256 cert at runtime. Used by integration tests
+# under tests/.
+x509-cert     = { version = "0.2", features = ["builder", "std"] }
 
 [[example]]
 name = "axum_server"

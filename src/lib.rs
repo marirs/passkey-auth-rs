@@ -39,6 +39,7 @@ mod cose;
 mod crypto;
 pub mod error;
 mod types;
+mod x509;
 
 pub use ceremony::{Attachment, Webauthn};
 pub use error::{Error, Result};

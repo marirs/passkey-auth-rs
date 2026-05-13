@@ -40,16 +40,27 @@ rustcrypto end-to-end:
 - Registration ceremony (parse `AuthenticatorAttestationResponse`, verify origin/challenge, extract public key)
 - Authentication ceremony (parse `AuthenticatorAssertionResponse`, verify signature)
 - Algorithms: **ES256** (COSE alg -7, P-256 ECDSA) and **EdDSA** (-8, Ed25519)
-- Attestation formats: `none` (fully) and `packed` self-attestation (no cert chain)
+- Attestation formats:
+  - `none` (fully)
+  - `packed` self-attestation (no cert chain)
+  - `packed` with `x5c` cert chain (cert sig verified; chain NOT validated to a root)
+  - `fido-u2f` (legacy Yubikeys; cert sig verified, chain NOT validated)
 - Replay protection via the authenticator counter
 - Opt-in **user-verification enforcement** for production passkey deployments
+- Configurable **authenticator attachment** (platform / cross-platform / any) — see [`Attachment`](https://docs.rs/passkey-auth/latest/passkey_auth/enum.Attachment.html)
 - Permissive base64 decoding: accepts url-safe / standard / padded / unpadded inputs
 
 Not in scope:
 
-- Full attestation cert chain validation (FIDO MDS)
+- **Cert chain validation against a trusted root.** Without the FIDO
+  Metadata Service we cannot tell whether an `x5c` cert really came
+  from Yubico / Feitian / etc.; we only confirm the attestation `sig`
+  was produced by whoever owns the leaf cert's private key. For "only
+  these specific authenticator models" enterprise policy, you need
+  full MDS — this crate is not the right pick.
 - Conditional UI / discoverable credentials beyond what the server needs to know
 - RSA / RS256 (rare for passkeys; reject with a clear error)
+- TPM / Android-Key / Android-SafetyNet / Apple attestation formats
 
 ## Usage
 
