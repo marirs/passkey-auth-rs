@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel previous in-flight runs of the same workflow on the same ref -
+# saves CI minutes when commits land in quick succession.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Surface warnings as build noise but do NOT fail the build on them
+  # here; clippy has its own job that DOES gate.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Test matrix: build + test across every supported (OS, arch) combination.
+  # All runners listed are first-class GitHub-hosted; no QEMU/cross.
+  # -------------------------------------------------------------------------
+  test:
+    name: test (${{ matrix.os }} / ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: linux,   arch: x86_64,  runner: ubuntu-24.04 }
+          - { os: linux,   arch: aarch64, runner: ubuntu-24.04-arm }
+          - { os: macos,   arch: x86_64,  runner: macos-13 }
+          - { os: macos,   arch: aarch64, runner: macos-14 }
+          - { os: windows, arch: x86_64,  runner: windows-2022 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --all-targets --verbose
+
+      - name: Test
+        run: cargo test --all-targets --verbose
+
+      - name: Doc-tests
+        run: cargo test --doc --verbose
+
+  # -------------------------------------------------------------------------
+  # Formatting check. Cheap, run on a single Linux box.
+  # -------------------------------------------------------------------------
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  # -------------------------------------------------------------------------
+  # Lint. Treated as gating; new clippy lints can break CI.
+  # -------------------------------------------------------------------------
+  clippy:
+    name: clippy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+
+  # -------------------------------------------------------------------------
+  # MSRV check: confirms the crate still builds on the rust-version we
+  # claim in Cargo.toml (1.85). Linux-only - the toolchain matters, not
+  # the OS.
+  # -------------------------------------------------------------------------
+  msrv:
+    name: MSRV (1.85)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.85"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --all-targets
+
+  # -------------------------------------------------------------------------
+  # Docs build sanity check. Catches broken doc links / examples before
+  # docs.rs picks them up.
+  # -------------------------------------------------------------------------
+  docs:
+    name: docs
+    runs-on: ubuntu-24.04
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --no-deps --all-features

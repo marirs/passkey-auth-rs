@@ -185,7 +185,7 @@ fn register_then_authenticate_happy_path() {
     assert_eq!(credential.transports, vec!["internal".to_string()]);
 
     // ---- Authentication --------------------------------------------------
-    let (chal, state) = wa.start_authentication(&[credential.id.clone()]);
+    let (chal, state) = wa.start_authentication(std::slice::from_ref(&credential.id));
 
     let auth_data = auth.auth_data_authenticate(None); // counter -> 1
     let (cdj_raw, cdj_b64) = client_data("webauthn.get", &chal.challenge, ORIGIN);
@@ -245,7 +245,7 @@ fn require_uv_rejects_uv_less_assertion() {
     // Authenticator drops the UV bit for the assertion (simulates a
     // user who tapped without biometric / PIN).
     auth.flags = FLAG_UP; // UP only, no UV
-    let (chal, state) = wa.start_authentication(&[credential.id.clone()]);
+    let (chal, state) = wa.start_authentication(std::slice::from_ref(&credential.id));
     let auth_data = auth.auth_data_authenticate(None);
     let (cdj_raw, cdj_b64) = client_data("webauthn.get", &chal.challenge, ORIGIN);
     let sig = auth.sign_assertion(&auth_data, &cdj_raw);
@@ -270,7 +270,7 @@ fn wrong_origin_rejected() {
     let mut auth = FakeAuthenticator::new();
     let credential = do_register(&wa, &mut auth);
 
-    let (chal, state) = wa.start_authentication(&[credential.id.clone()]);
+    let (chal, state) = wa.start_authentication(std::slice::from_ref(&credential.id));
     let auth_data = auth.auth_data_authenticate(None);
     // ClientDataJSON pretends to come from a different origin.
     let (cdj_raw, cdj_b64) = client_data("webauthn.get", &chal.challenge, "https://evil.com");
@@ -296,7 +296,7 @@ fn wrong_challenge_rejected() {
     let mut auth = FakeAuthenticator::new();
     let credential = do_register(&wa, &mut auth);
 
-    let (_chal, state) = wa.start_authentication(&[credential.id.clone()]);
+    let (_chal, state) = wa.start_authentication(std::slice::from_ref(&credential.id));
     let auth_data = auth.auth_data_authenticate(None);
     // ClientDataJSON contains a challenge we never issued.
     let (cdj_raw, cdj_b64) = client_data("webauthn.get", &B64URL.encode([0u8; 32]), ORIGIN);
