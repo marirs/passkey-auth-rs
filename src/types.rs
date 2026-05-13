@@ -7,7 +7,10 @@
 //! handler can deserialize directly off the request body.
 
 use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
+use base64::engine::general_purpose::{
+    STANDARD as B64STD, STANDARD_NO_PAD as B64STD_NO_PAD, URL_SAFE as B64URL_PAD,
+    URL_SAFE_NO_PAD as B64URL,
+};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
@@ -118,18 +121,30 @@ impl RpId {
 
 // ---------- Helpers ------------------------------------------------------
 
-/// Decode a base64url-no-pad string the way the WebAuthn spec demands.
-/// Also accepts standard base64 with padding for tolerance.
+/// Decode a base64url-no-pad string the way the WebAuthn spec demands,
+/// with permissive fallbacks for client serializers that emit:
+///   - base64url WITH padding (some JSON helpers add `=`)
+///   - standard base64 (`+`/`/` alphabet) with or without padding -
+///     common when client JS uses `btoa(String.fromCharCode(...))`
+///
+/// We try strict url-safe-no-pad first (spec), then progressively
+/// looser variants. All four alphabets are checked before giving up.
 pub(crate) fn b64url_decode(s: &str) -> Result<Vec<u8>> {
-    // Try strict url-safe-no-pad first (the spec).
+    // 1. spec-compliant: url-safe, no padding
     if let Ok(v) = B64URL.decode(s) {
         return Ok(v);
     }
-    // Fallback: standard / url-safe with padding, just in case the
-    // browser-side serializer added padding. Strip `=` and retry.
-    let trimmed = s.trim_end_matches('=');
-    B64URL
-        .decode(trimmed)
+    // 2. url-safe WITH padding
+    if let Ok(v) = B64URL_PAD.decode(s) {
+        return Ok(v);
+    }
+    // 3. standard alphabet, no padding
+    if let Ok(v) = B64STD_NO_PAD.decode(s) {
+        return Ok(v);
+    }
+    // 4. standard alphabet, with padding (last-ditch; report this error)
+    B64STD
+        .decode(s)
         .map_err(|e| Error::Base64(e.to_string()))
 }
 
@@ -295,4 +310,50 @@ pub struct AuthSuccess {
     pub credential_id: CredentialId,
     pub new_counter: u32,
     pub user_verified: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 5 bytes → 7 base64 chars + 1 pad char. Length is chosen so the
+    /// padded variants actually carry a trailing `=`. The byte values
+    /// include 0xFB which encodes to `+`/`-` (last alphabet slot) and
+    /// 0xFF which encodes to `/`/`_`, so any alphabet confusion in the
+    /// decoder surfaces here.
+    const SAMPLE: &[u8] = &[0xFB, 0xEF, 0xBE, 0xFF, 0xCC];
+
+    #[test]
+    fn decodes_url_safe_no_pad() {
+        // base64url-no-pad of SAMPLE
+        let encoded = B64URL.encode(SAMPLE);
+        assert_eq!(b64url_decode(&encoded).unwrap(), SAMPLE);
+    }
+
+    #[test]
+    fn decodes_url_safe_with_pad() {
+        let encoded = B64URL_PAD.encode(SAMPLE);
+        assert!(encoded.ends_with('=')); // sanity
+        assert_eq!(b64url_decode(&encoded).unwrap(), SAMPLE);
+    }
+
+    #[test]
+    fn decodes_standard_no_pad() {
+        let encoded = B64STD_NO_PAD.encode(SAMPLE);
+        assert_eq!(b64url_decode(&encoded).unwrap(), SAMPLE);
+    }
+
+    #[test]
+    fn decodes_standard_with_pad() {
+        // The killer case: standard alphabet with padding, exactly
+        // what `btoa(String.fromCharCode(...new Uint8Array(buf)))`
+        // produces in browser JS.
+        let encoded = B64STD.encode(SAMPLE);
+        assert_eq!(b64url_decode(&encoded).unwrap(), SAMPLE);
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert!(b64url_decode("!!!not-base64!!!").is_err());
+    }
 }
