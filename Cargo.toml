@@ -1,0 +1,42 @@
+[package]
+name        = "passkey-auth"
+version     = "0.1.0"
+edition     = "2024"
+rust-version = "1.85"
+license     = "MIT OR Apache-2.0"
+description = "Pure-Rust WebAuthn server library focused on passkeys (no openssl)."
+repository  = "https://github.com/marirs/passkey-rs"
+readme      = "README.md"
+keywords    = ["webauthn", "passkey", "fido2", "authentication"]
+categories  = ["authentication", "cryptography"]
+
+[lib]
+name = "passkey_auth"
+path = "src/lib.rs"
+
+[dependencies]
+# Crypto, all rustcrypto / pure-Rust. No openssl anywhere in the tree.
+p256          = { version = "0.13", features = ["ecdsa"] }
+ed25519-dalek = { version = "2", features = ["pkcs8"] }
+sha2          = "0.10"
+rand          = "0.8"
+
+# CBOR for COSE keys + attestationObject.
+ciborium      = "0.2"
+
+# Base64URL for credential IDs, challenges, raw byte fields on the wire.
+base64        = "0.22"
+
+# JSON for clientDataJSON parsing.
+serde         = { version = "1", features = ["derive"] }
+serde_json    = "1"
+
+# Error type.
+thiserror     = "2"
+
+# URL parsing for origin checks.
+url           = "2"
+
+[dev-dependencies]
+# Known-vector regression tests live under tests/.
+hex           = "0.4"

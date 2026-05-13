@@ -1,0 +1,7 @@
+.*
+!.gitignore
+!.github
+target/
+Cargo.lock
+
+.DS_Store
