@@ -93,26 +93,58 @@ impl CosePublicKey {
 pub struct RpId(pub(crate) String);
 
 impl RpId {
-    /// Construct from a string. Stripped of leading scheme/port if the
-    /// caller accidentally pasted a URL.
+    /// Construct from a string that already IS a bare RP ID
+    /// (`example.com`, `subdomain.example.com`). Use this in
+    /// production code where the value comes from a config file or
+    /// known constant.
+    ///
+    /// If you might receive a full URL, use [`Self::try_from_url`]
+    /// instead - this constructor stores the input verbatim and does
+    /// NOT strip scheme/port/path, so passing `"https://example.com"`
+    /// here gives you a broken RP ID.
     pub fn new(rp_id: impl Into<String>) -> Self {
-        let mut s = rp_id.into();
-        if let Some(rest) = s.strip_prefix("https://") {
-            s = rest.to_owned();
-        } else if let Some(rest) = s.strip_prefix("http://") {
-            s = rest.to_owned();
-        }
-        // Drop a trailing port: "example.com:8443" → "example.com".
-        // The RP ID is a domain, ports never participate.
-        if let Some((host, _)) = s.split_once(':') {
-            s = host.to_owned();
-        }
-        // Drop a trailing path.
-        if let Some((host, _)) = s.split_once('/') {
-            s = host.to_owned();
-        }
-        Self(s)
+        Self(rp_id.into())
     }
+
+    /// Try to extract an RP ID from a URL or URL-like input.
+    /// Accepts:
+    ///   - bare domains:        `"example.com"`
+    ///   - full origins:        `"https://example.com:8443"`
+    ///   - origins with a path: `"https://example.com/auth/start"`
+    ///
+    /// Returns `Err` if the input is neither parseable as a URL nor a
+    /// plausible bare hostname (no whitespace, no userinfo, etc.).
+    /// Use this when the input might be a URL the operator pasted.
+    pub fn try_from_url(input: &str) -> Result<Self> {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return Err(Error::Internal("RP ID is empty"));
+        }
+
+        // First try a strict URL parse - works for "https://..." inputs.
+        if let Ok(u) = url::Url::parse(trimmed) {
+            if let Some(host) = u.host_str() {
+                return Ok(Self(host.to_owned()));
+            }
+            return Err(Error::Internal("URL has no host component"));
+        }
+
+        // Fall back: treat as a bare hostname. Reject anything that
+        // contains characters a hostname cannot legitimately have
+        // (whitespace, `@` for userinfo, `:` for ports, `/` for paths)
+        // rather than silently mangling them as the v1 implementation
+        // did.
+        if trimmed
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, '@' | ':' | '/' | '?' | '#'))
+        {
+            return Err(Error::Internal(
+                "RP ID is not a bare hostname (contains scheme/port/path/userinfo)",
+            ));
+        }
+        Ok(Self(trimmed.to_owned()))
+    }
+
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
@@ -355,5 +387,53 @@ mod tests {
     #[test]
     fn rejects_garbage() {
         assert!(b64url_decode("!!!not-base64!!!").is_err());
+    }
+
+    // ---- RpId ----------------------------------------------------------
+
+    #[test]
+    fn rpid_new_stores_verbatim() {
+        assert_eq!(RpId::new("example.com").as_str(), "example.com");
+        // No magic stripping any more.
+        assert_eq!(RpId::new("sub.example.com").as_str(), "sub.example.com");
+    }
+
+    #[test]
+    fn rpid_try_from_url_bare_domain() {
+        assert_eq!(
+            RpId::try_from_url("example.com").unwrap().as_str(),
+            "example.com",
+        );
+    }
+
+    #[test]
+    fn rpid_try_from_url_https_origin() {
+        assert_eq!(
+            RpId::try_from_url("https://example.com").unwrap().as_str(),
+            "example.com",
+        );
+    }
+
+    #[test]
+    fn rpid_try_from_url_with_port_and_path() {
+        assert_eq!(
+            RpId::try_from_url("https://example.com:8443/auth/start")
+                .unwrap()
+                .as_str(),
+            "example.com",
+        );
+    }
+
+    #[test]
+    fn rpid_try_from_url_rejects_userinfo_in_bare() {
+        // "user:pass@host" looks like a hostname but isn't one. The v1
+        // implementation silently truncated to "user" - we reject.
+        assert!(RpId::try_from_url("user:pass@example.com").is_err());
+    }
+
+    #[test]
+    fn rpid_try_from_url_rejects_empty() {
+        assert!(RpId::try_from_url("").is_err());
+        assert!(RpId::try_from_url("   ").is_err());
     }
 }

@@ -45,5 +45,5 @@ pub use error::{Error, Result};
 pub use types::{
     AuthSuccess, AuthenticationChallenge, AuthenticationResponse, AuthenticationState, Challenge,
     CosePublicKey, CredentialId, PasskeyCredential, RegistrationChallenge, RegistrationResponse,
-    RegistrationState,
+    RegistrationState, RpId,
 };
