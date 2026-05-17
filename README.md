@@ -39,16 +39,17 @@ rustcrypto end-to-end:
 
 - Registration ceremony (parse `AuthenticatorAttestationResponse`, verify origin/challenge, extract public key)
 - Authentication ceremony (parse `AuthenticatorAssertionResponse`, verify signature)
-- Algorithms: **ES256** (COSE alg -7, P-256 ECDSA) and **EdDSA** (-8, Ed25519)
+- Algorithms: **ES256** (COSE alg -7, P-256 ECDSA) and **EdDSA** (-8, Ed25519); the credential's alg is enforced at registration against the advertised `pubKeyCredParams` (WebAuthn-3 §7.1 step 19)
 - Attestation formats:
   - `none` (fully)
   - `packed` self-attestation (no cert chain)
   - `packed` with `x5c` cert chain (cert sig verified; chain NOT validated to a root)
   - `fido-u2f` (legacy Yubikeys; cert sig verified, chain NOT validated)
 - Replay protection via the authenticator counter
-- Opt-in **user-verification enforcement** for production passkey deployments
+- Opt-in **user-verification enforcement** for production passkey deployments (`.require_user_verification(true)`)
+- Opt-in **user-handle enforcement** for username-first flows (`start_authentication_for_user` + `.require_user_handle(true)`) — verifies the assertion's `userHandle` matches the expected user (WebAuthn-3 §7.2 step 6)
 - Configurable **authenticator attachment** (platform / cross-platform / any) — see [`Attachment`](https://docs.rs/passkey-auth/latest/passkey_auth/enum.Attachment.html)
-- Permissive base64 decoding: accepts url-safe / standard / padded / unpadded inputs
+- Base64 decoding: lenient by default (accepts url-safe / standard / padded / unpadded inputs); flip `.strict_base64(true)` to require spec-compliant url-safe-no-pad
 
 Not in scope:
 
@@ -69,16 +70,19 @@ use passkey_auth::{
     AuthenticationResponse, PasskeyCredential, RegistrationResponse, Webauthn,
 };
 
-// Construct once at boot. Cheap to clone.
-// `require_user_verification(true)` makes the server reject any
-// ceremony where the authenticator did not set the UV bit -
-// what you want for production passkey deployments.
+// Construct once at boot. Cheap to clone. Production-tightening
+// builders:
+//   .require_user_verification(true)  reject UV-less assertions
+//   .require_user_handle(true)        reject assertions missing the
+//                                     userHandle in for_user flows
+//   .strict_base64(true)              reject non-spec base64 on wire
 let wa = Webauthn::new("example.com", "Example", "https://example.com")
     .require_user_verification(true);
 
 // ── 1. Registration ───────────────────────────────────────────────
+let user_id: &[u8] = b"user-handle-bytes"; // stable opaque user id
 let (challenge, state) = wa.start_registration(
-    b"user-handle-bytes",  // stable opaque user id
+    user_id,
     "alice@example.com",   // user.name  (RP-facing)
     "Alice",               // user.displayName
     &[],                   // credentials already registered (for excludeCredentials)
@@ -91,10 +95,19 @@ let credential: PasskeyCredential = wa.finish_registration(&state, &response)?;
 // Persist: credential.id, credential.public_key_cose,
 //          credential.counter, credential.transports, credential.aaguid
 
-// ── 2. Authentication ─────────────────────────────────────────────
-// Pass the user's stored credentials so the browser gets the right
-// transport hints (USB / NFC / BLE / internal).
-let (challenge, state) = wa.start_authentication_with_creds(&[credential.clone()]);
+// ── 2. Authentication (username-first flow) ───────────────────────
+// `_for_user` records the user_handle on the state so
+// finish_authentication can verify the assertion is FOR this user
+// (WebAuthn-3 §7.2 step 6) — defence in depth against credential-id
+// collisions in a multi-user store.
+//
+// Use plain `start_authentication_with_creds(&creds)` for
+// discoverable / passwordless flows where the user is unknown
+// until the response arrives — see examples/axum_passwordless.rs.
+let (challenge, state) = wa.start_authentication_with_creds_for_user(
+    user_id,
+    &[credential.clone()],
+);
 let response: AuthenticationResponse = todo!();
 
 let outcome = wa.finish_authentication(&state, &response, &credential)?;
@@ -122,9 +135,24 @@ or call `try_from_url` first.
 The browser's `AuthenticatorResponse` fields (`attestationObject`,
 `authenticatorData`, `clientDataJSON`, `signature`) are
 `ArrayBuffer`s; the JS layer must base64-encode them before posting.
-This crate accepts **either** url-safe-base64 **or** standard-base64,
-with **or** without padding — so the obvious `btoa(...)` pattern works
-without a separate url-safe-conversion step.
+
+By default this crate is **lenient**: it accepts url-safe-base64
+**or** standard-base64, **with or without** padding — so the obvious
+`btoa(...)` pattern works without a separate url-safe-conversion
+step. Convenient for getting started.
+
+Production deployments that control their own client JS should flip
+the strict toggle:
+
+```rust,ignore
+let wa = Webauthn::new("example.com", "Example", "https://example.com")
+    .strict_base64(true);
+```
+
+Strict mode accepts only the spec-compliant url-safe-no-pad
+encoding (WebAuthn §6.1). Any other variant returns
+`Error::Base64`, surfacing client-side encoding bugs instead of
+papering over them.
 
 ## Working examples
 
