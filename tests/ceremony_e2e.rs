@@ -417,6 +417,115 @@ fn lenient_base64_accepts_standard_alphabet() {
     assert_eq!(outcome.new_counter, 1);
 }
 
+// ---------- user_handle (I2) ----------------------------------------------
+
+/// Helper: build an AuthenticationResponse for a credential, optionally
+/// stamping a user_handle (b64url-encoded). Used by the four
+/// user_handle tests below.
+fn make_assertion(
+    auth: &mut FakeAuthenticator,
+    chal_b64: &str,
+    user_handle: Option<&[u8]>,
+) -> AuthenticationResponse {
+    let auth_data = auth.auth_data_authenticate(None);
+    let (cdj_raw, cdj_b64) = client_data("webauthn.get", chal_b64, ORIGIN);
+    let sig = auth.sign_assertion(&auth_data, &cdj_raw);
+    AuthenticationResponse {
+        id: B64URL.encode(&auth.credential_id),
+        authenticator_data: B64URL.encode(&auth_data),
+        signature: B64URL.encode(&sig),
+        client_data_json: cdj_b64,
+        user_handle: user_handle.map(|h| B64URL.encode(h)),
+    }
+}
+
+const USER_HANDLE: &[u8] = b"user-handle-0001";
+const OTHER_USER_HANDLE: &[u8] = b"user-handle-0002";
+
+#[test]
+fn user_handle_match_succeeds() {
+    // start_authentication_for_user + response.user_handle = expected → ok.
+    let wa = Webauthn::new(RP_ID, "Example", ORIGIN);
+    let mut auth = FakeAuthenticator::new();
+    let credential = do_register(&wa, &mut auth);
+
+    let (chal, state) = wa.start_authentication_for_user(USER_HANDLE, std::slice::from_ref(&credential.id));
+    let response = make_assertion(&mut auth, &chal.challenge, Some(USER_HANDLE));
+
+    wa.finish_authentication(&state, &response, &credential)
+        .expect("matching user_handle must succeed");
+}
+
+#[test]
+fn user_handle_mismatch_rejected() {
+    // start_authentication_for_user + response.user_handle = different
+    // → UserHandleMismatch (the credential-id-collision protection).
+    let wa = Webauthn::new(RP_ID, "Example", ORIGIN);
+    let mut auth = FakeAuthenticator::new();
+    let credential = do_register(&wa, &mut auth);
+
+    let (chal, state) = wa.start_authentication_for_user(USER_HANDLE, std::slice::from_ref(&credential.id));
+    let response = make_assertion(&mut auth, &chal.challenge, Some(OTHER_USER_HANDLE));
+
+    let err = wa
+        .finish_authentication(&state, &response, &credential)
+        .unwrap_err();
+    assert!(matches!(err, Error::UserHandleMismatch), "got {err:?}");
+}
+
+#[test]
+fn user_handle_absent_in_response_is_accepted_by_default() {
+    // start_authentication_for_user + response.user_handle = None →
+    // accept (WebAuthn-3 §7.2 step 6: "if present, verify"). This is
+    // the spec-default behaviour so non-resident hardware keys keep
+    // working.
+    let wa = Webauthn::new(RP_ID, "Example", ORIGIN);
+    let mut auth = FakeAuthenticator::new();
+    let credential = do_register(&wa, &mut auth);
+
+    let (chal, state) = wa.start_authentication_for_user(USER_HANDLE, std::slice::from_ref(&credential.id));
+    let response = make_assertion(&mut auth, &chal.challenge, None);
+
+    wa.finish_authentication(&state, &response, &credential)
+        .expect("absent user_handle must be accepted by default");
+}
+
+#[test]
+fn require_user_handle_rejects_absent_response_handle() {
+    // start_authentication_for_user + response.user_handle = None +
+    // require_user_handle(true) → reject. This is the tighter mode for
+    // platform-authenticator-only deployments where the user_handle
+    // is always emitted.
+    let wa = Webauthn::new(RP_ID, "Example", ORIGIN).require_user_handle(true);
+    let mut auth = FakeAuthenticator::new();
+    let credential = do_register(&wa, &mut auth);
+
+    let (chal, state) = wa.start_authentication_for_user(USER_HANDLE, std::slice::from_ref(&credential.id));
+    let response = make_assertion(&mut auth, &chal.challenge, None);
+
+    let err = wa
+        .finish_authentication(&state, &response, &credential)
+        .unwrap_err();
+    assert!(matches!(err, Error::UserHandleMismatch), "got {err:?}");
+}
+
+#[test]
+fn legacy_start_authentication_skips_user_handle_check_entirely() {
+    // The simpler entry point still works exactly as before — even
+    // when the response includes a user_handle. The check only runs
+    // when state.user_handle is Some.
+    let wa = Webauthn::new(RP_ID, "Example", ORIGIN).require_user_handle(true);
+    let mut auth = FakeAuthenticator::new();
+    let credential = do_register(&wa, &mut auth);
+
+    let (chal, state) = wa.start_authentication(std::slice::from_ref(&credential.id));
+    // Response carries SOME user_handle, but state has None → skipped.
+    let response = make_assertion(&mut auth, &chal.challenge, Some(b"anything"));
+
+    wa.finish_authentication(&state, &response, &credential)
+        .expect("legacy entry point ignores user_handle entirely");
+}
+
 // ---------- helper ---------------------------------------------------------
 
 fn do_register(wa: &Webauthn, auth: &mut FakeAuthenticator) -> passkey_auth::PasskeyCredential {

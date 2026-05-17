@@ -360,6 +360,18 @@ pub struct AuthenticationState {
     /// called.
     #[serde(default)]
     pub created_at: u64,
+    /// User handle the caller expects to authenticate. Populated by
+    /// [`crate::Webauthn::start_authentication_for_user`] for
+    /// username-first flows; left `None` for discoverable-credential
+    /// (passwordless) flows where the user is not known until the
+    /// response arrives.
+    ///
+    /// When `Some` AND the assertion response carries a `userHandle`,
+    /// `finish_authentication` enforces equality (WebAuthn-3 §7.2 step
+    /// 6). `#[serde(default)]` means states persisted by older
+    /// versions of the crate deserialize cleanly with `None`.
+    #[serde(default)]
+    pub user_handle: Option<Vec<u8>>,
 }
 
 impl AuthenticationState {

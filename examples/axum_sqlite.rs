@@ -299,7 +299,13 @@ async fn authenticate_start(
         ));
     }
 
-    let (challenge, auth_state) = state.wa.start_authentication_with_creds(&creds);
+    // Use the for_user variant so finish_authentication can verify
+    // the assertion's userHandle matches THIS user (WebAuthn-3 §7.2
+    // step 6) — defence in depth against credential-id collisions in
+    // a multi-user store.
+    let (challenge, auth_state) = state
+        .wa
+        .start_authentication_with_creds_for_user(&user_handle, &creds);
 
     state
         .sessions

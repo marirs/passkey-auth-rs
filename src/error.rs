@@ -77,6 +77,15 @@ pub enum Error {
     #[error("ceremony state expired ({age_secs} seconds old, max {max_secs})")]
     CeremonyExpired { age_secs: u64, max_secs: u64 },
 
+    /// The `userHandle` carried in the assertion response did not
+    /// match the user handle recorded at `start_authentication_for_user`
+    /// time (WebAuthn-3 §7.2 step 6). Indicates an attack — the
+    /// assertion is for a different user than the ceremony was
+    /// started for — or, when `require_user_handle(true)` is set, an
+    /// authenticator that did not emit a user_handle at all.
+    #[error("user handle mismatch: assertion is for a different user than the ceremony was started for")]
+    UserHandleMismatch,
+
     /// Internal invariant violation (bug). Should never reach a user.
     #[error("internal: {0}")]
     Internal(&'static str),

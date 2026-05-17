@@ -103,6 +103,17 @@ pub struct Webauthn {
     /// should set this to `true` to surface client-side encoding
     /// bugs rather than silently working around them.
     strict_base64: bool,
+    /// When `true`, `finish_authentication` REQUIRES the assertion
+    /// response to include a `userHandle` whenever the ceremony was
+    /// started via `start_authentication_for_user`. WebAuthn-3 §7.2
+    /// step 6 says "if present, verify"; this flag tightens that to
+    /// "must be present and verify." Recommended for platform-
+    /// authenticator-only deployments (Touch ID, Windows Hello,
+    /// iCloud Keychain) where the user_handle is always emitted.
+    /// Leave `false` (default) if you also accept hardware keys in
+    /// non-resident mode, where the user_handle may legitimately be
+    /// absent.
+    require_user_handle: bool,
 }
 
 impl Webauthn {
@@ -140,6 +151,7 @@ impl Webauthn {
             require_uv: false,
             attachment: Attachment::Platform,
             strict_base64: false,
+            require_user_handle: false,
         }
     }
 
@@ -158,6 +170,28 @@ impl Webauthn {
     #[must_use]
     pub fn strict_base64(mut self, strict: bool) -> Self {
         self.strict_base64 = strict;
+        self
+    }
+
+    /// Builder: when `true`, an authentication ceremony started via
+    /// [`Self::start_authentication_for_user`] REQUIRES the assertion
+    /// response to carry a matching `userHandle`. A missing
+    /// `userHandle` becomes `Error::UserHandleMismatch`.
+    ///
+    /// WebAuthn-3 §7.2 step 6 only mandates checking the user_handle
+    /// "if present"; this flag tightens that to "must be present and
+    /// match." Use it when your deployment only accepts platform
+    /// authenticators (Touch ID, Windows Hello, iCloud Keychain) or
+    /// hardware keys in resident-credential mode — those always emit
+    /// a user_handle. Leave it `false` (default) if you also accept
+    /// hardware keys in non-resident mode, where the user_handle is
+    /// legitimately absent.
+    ///
+    /// No effect on ceremonies started via [`Self::start_authentication`]
+    /// (which has no expected user_handle to compare against).
+    #[must_use]
+    pub fn require_user_handle(mut self, require: bool) -> Self {
+        self.require_user_handle = require;
         self
     }
 
@@ -433,7 +467,69 @@ impl Webauthn {
             challenge,
             allow_credentials: ids.to_vec(),
             created_at: now_secs(),
+            // Set by start_authentication_for_user only; the simple
+            // entry points leave it None so finish_authentication
+            // skips the user_handle equality check.
+            user_handle: None,
         };
+        (chal, state)
+    }
+
+    /// Like [`Self::start_authentication`] but records the user
+    /// handle of the user being authenticated. When the assertion
+    /// response comes back, `finish_authentication` will verify that
+    /// `response.userHandle` equals this value (WebAuthn-3 §7.2
+    /// step 6) — protection against credential-id-collision attacks
+    /// in multi-user stores.
+    ///
+    /// Use this in username-first flows where the server already
+    /// knows which user is trying to sign in. For discoverable /
+    /// passwordless flows (the user is unknown until the response
+    /// arrives), use [`Self::start_authentication`] and look the
+    /// user up by `response.user_handle` yourself.
+    ///
+    /// By default the check is skipped when `response.user_handle`
+    /// is absent (per spec). Tighten that with
+    /// [`Self::require_user_handle`] for platform-authenticator-only
+    /// deployments where the user_handle is always emitted.
+    pub fn start_authentication_for_user(
+        &self,
+        user_handle: &[u8],
+        allow_credentials: &[CredentialId],
+    ) -> (AuthenticationChallenge, AuthenticationState) {
+        let descriptors = allow_credentials
+            .iter()
+            .map(|c| CredentialDescriptor {
+                kind: "public-key",
+                id: c.to_b64url(),
+                transports: Vec::new(),
+            })
+            .collect();
+        let (chal, mut state) = self.build_auth_challenge(allow_credentials, descriptors);
+        state.user_handle = Some(user_handle.to_vec());
+        (chal, state)
+    }
+
+    /// Like [`Self::start_authentication_with_creds`] but ALSO records
+    /// the user_handle for the §7.2 step 6 check. Use this in
+    /// production username-first flows: you get both the transports
+    /// hint (better UX) and the user_handle equality protection.
+    pub fn start_authentication_with_creds_for_user(
+        &self,
+        user_handle: &[u8],
+        allow_credentials: &[PasskeyCredential],
+    ) -> (AuthenticationChallenge, AuthenticationState) {
+        let descriptors = allow_credentials
+            .iter()
+            .map(|c| CredentialDescriptor {
+                kind: "public-key",
+                id: c.id.to_b64url(),
+                transports: c.transports.clone(),
+            })
+            .collect();
+        let ids: Vec<CredentialId> = allow_credentials.iter().map(|c| c.id.clone()).collect();
+        let (chal, mut state) = self.build_auth_challenge(&ids, descriptors);
+        state.user_handle = Some(user_handle.to_vec());
         (chal, state)
     }
 
@@ -478,6 +574,36 @@ impl Webauthn {
         }
         if asserted_id != stored.id {
             return Err(Error::BadSignature);
+        }
+
+        // 1b. WebAuthn-3 §7.2 step 6: if the ceremony was started via
+        // start_authentication_for_user, the response's userHandle
+        // MUST match the user handle the caller recorded. This is
+        // the defence-in-depth check against credential-id-collision
+        // attacks that the doc-comment on this function warns about.
+        //
+        // Behaviour matrix when state.user_handle = Some(expected):
+        //   response.user_handle = Some(got) → equality enforced
+        //   response.user_handle = None      → require_user_handle
+        //                                       gates accept vs reject
+        //                                       (spec default: accept)
+        //
+        // When state.user_handle = None (the ceremony was started via
+        // start_authentication{,_with_creds}) the check is skipped
+        // entirely — the caller has no expected value to compare.
+        if let Some(expected) = &state.user_handle {
+            match response.user_handle.as_deref() {
+                Some(got_b64) => {
+                    let got = self.decode_b64(got_b64)?;
+                    if &got != expected {
+                        return Err(Error::UserHandleMismatch);
+                    }
+                }
+                None if self.require_user_handle => {
+                    return Err(Error::UserHandleMismatch);
+                }
+                None => { /* spec-default: skip when absent */ }
+            }
         }
 
         // 2. Validate clientDataJSON.

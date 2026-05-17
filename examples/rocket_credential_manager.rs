@@ -140,10 +140,17 @@ fn authenticate_start(
         ));
     }
     let creds = user.credentials.clone();
+    let handle = user.handle.clone();
     drop(user);
 
     let sid = sid_or_new(cookies);
-    let (challenge, auth_state) = state.wa.start_authentication_with_creds(&creds);
+    // Use the for_user variant so finish_authentication can verify
+    // the assertion's userHandle matches THIS user (WebAuthn-3 §7.2
+    // step 6) — defence in depth against credential-id collisions in
+    // a multi-user store.
+    let (challenge, auth_state) = state
+        .wa
+        .start_authentication_with_creds_for_user(&handle, &creds);
 
     state
         .sessions
