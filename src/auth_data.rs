@@ -121,19 +121,21 @@ impl AuthenticatorData {
     }
 }
 
-/// Read a CBOR item from `data` and return the byte length it occupies.
-/// ciborium doesn't give a direct API for this; we deserialize then
-/// re-serialize using the canonical encoder and compare lengths.
+/// Read a single CBOR item from `data` and return the byte length it
+/// occupies. ciborium does not expose a direct "how many bytes did you
+/// consume" API, so we wrap the slice in a `std::io::Cursor` and read
+/// its `position()` after the parse. Cursor's position-tracking is a
+/// documented part of std::io, so this is robust to any future
+/// internal-buffering change in ciborium (whereas the earlier
+/// `data.len() - cur.len()` trick relied on an implementation detail of
+/// the `Read for &[u8]` impl — fine today, fragile tomorrow).
 fn cose_blob_length(data: &[u8]) -> Result<usize> {
-    // Use a reader that tracks position. The trick: deserialize into
-    // a Value, then walk the input bytes to find the same logical end.
-    // ciborium's `from_reader` consumes from `&[u8]` and we can compute
-    // the remaining slice afterwards.
-    let mut cur = data;
+    let mut cur = std::io::Cursor::new(data);
     let _: CborValue =
         ciborium::de::from_reader(&mut cur).map_err(|e| Error::Cbor(format!("cose key: {e}")))?;
-    let consumed = data.len() - cur.len();
-    Ok(consumed)
+    // Cursor::position() is u64 but our data is a single AuthData blob
+    // (capped at ~1 KiB by spec); the conversion cannot truncate.
+    Ok(cur.position() as usize)
 }
 
 #[cfg(test)]

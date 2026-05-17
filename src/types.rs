@@ -161,6 +161,11 @@ impl RpId {
 ///
 /// We try strict url-safe-no-pad first (spec), then progressively
 /// looser variants. All four alphabets are checked before giving up.
+///
+/// For strict spec-conformant decoding (rejects everything except
+/// url-safe-no-pad), see [`b64url_decode_strict`]. Production
+/// deployments that control the client JS should prefer the strict
+/// form via [`Webauthn::strict_base64`].
 pub(crate) fn b64url_decode(s: &str) -> Result<Vec<u8>> {
     // 1. spec-compliant: url-safe, no padding
     if let Ok(v) = B64URL.decode(s) {
@@ -176,6 +181,18 @@ pub(crate) fn b64url_decode(s: &str) -> Result<Vec<u8>> {
     }
     // 4. standard alphabet, with padding (last-ditch; report this error)
     B64STD.decode(s).map_err(|e| Error::Base64(e.to_string()))
+}
+
+/// Strict spec-conformant base64url decode: ONLY accepts the
+/// url-safe alphabet with no padding. Any other variant is rejected.
+///
+/// WebAuthn §6.1 requires this exact encoding. Lenient decoding
+/// ([`b64url_decode`]) silently accepts non-conformant client JS,
+/// which is convenient during development but hides client-side bugs
+/// and broadens the input surface. Strict mode forces the client to
+/// emit the right thing.
+pub(crate) fn b64url_decode_strict(s: &str) -> Result<Vec<u8>> {
+    B64URL.decode(s).map_err(|e| Error::Base64(e.to_string()))
 }
 
 // ---------- Wire structs (request bodies) -------------------------------

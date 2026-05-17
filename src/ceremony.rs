@@ -13,10 +13,25 @@ use crate::types::{
     AuthSuccess, AuthenticationChallenge, AuthenticationResponse, AuthenticationState,
     AuthenticatorSelection, Challenge, CosePublicKey, CredentialDescriptor, CredentialId,
     PasskeyCredential, PubKeyCredParam, RegistrationChallenge, RegistrationResponse,
-    RegistrationState, RpId, RpInfo, UserInfo, b64url_decode, now_secs,
+    RegistrationState, RpId, RpInfo, UserInfo, b64url_decode, b64url_decode_strict, now_secs,
 };
 
 const CEREMONY_TIMEOUT_MS: u32 = 60_000;
+
+/// Algorithms this crate is willing to accept on a registered credential,
+/// in MOST-preferred order (per WebAuthn §5.4.3 the RP advertises a
+/// preference; the authenticator picks one of the listed values).
+///
+/// Used in two places that must agree:
+///   1. `start_registration` advertises this list to the browser in
+///      `pubKeyCredParams`.
+///   2. `finish_registration` enforces (WebAuthn-3 §7.1 step 19) that
+///      the algorithm of the credential the authenticator actually
+///      returned is one of the advertised values. Without this check a
+///      hostile or buggy authenticator could register a key for any
+///      algorithm our COSE parser happens to support — bypassing the
+///      relying party's algorithm policy.
+const ALLOWED_REGISTRATION_ALGS: &[i64] = &[ALG_ES256, ALG_EDDSA];
 
 /// Hard ceiling on how old a ceremony state may be when `finish_*` is
 /// called. Slightly larger than `CEREMONY_TIMEOUT_MS` (which is what
@@ -78,6 +93,16 @@ pub struct Webauthn {
     /// registration time. Does NOT affect authentication - by then
     /// the user already has a specific credential.
     attachment: Attachment,
+    /// When `true`, response-side wire fields (credential id,
+    /// attestationObject, clientDataJSON, authenticatorData,
+    /// signature, userHandle) MUST be encoded as strict
+    /// url-safe-no-pad base64. When `false` (default), the lenient
+    /// `b64url_decode` is used — accepting padding and the standard
+    /// alphabet for compatibility with buggy client JS that uses
+    /// `btoa(...)`. Production deployments that control the client
+    /// should set this to `true` to surface client-side encoding
+    /// bugs rather than silently working around them.
+    strict_base64: bool,
 }
 
 impl Webauthn {
@@ -114,6 +139,35 @@ impl Webauthn {
             origin: origin.to_owned(),
             require_uv: false,
             attachment: Attachment::Platform,
+            strict_base64: false,
+        }
+    }
+
+    /// Builder: when `true`, response-side wire fields are decoded
+    /// as strict url-safe-no-pad base64 — the only encoding the
+    /// WebAuthn spec permits. When `false` (default) lenient decoding
+    /// also accepts url-safe-with-padding and the standard alphabet,
+    /// papering over buggy client JS that uses `btoa(...)` instead
+    /// of a proper base64url encoder.
+    ///
+    /// Production deployments that control their own client JS should
+    /// flip this to `true` so client-side encoding bugs surface as
+    /// `Error::Base64` instead of silently working. Skip if you are
+    /// integrating with a third-party browser SDK whose encoding you
+    /// cannot guarantee.
+    #[must_use]
+    pub fn strict_base64(mut self, strict: bool) -> Self {
+        self.strict_base64 = strict;
+        self
+    }
+
+    /// Internal: pick the right base64 decoder for response-side
+    /// wire fields based on the `strict_base64` toggle.
+    fn decode_b64(&self, s: &str) -> Result<Vec<u8>> {
+        if self.strict_base64 {
+            b64url_decode_strict(s)
+        } else {
+            b64url_decode(s)
         }
     }
 
@@ -203,16 +257,15 @@ impl Webauthn {
             // authenticator (Touch ID, Windows Hello, Android, Yubikey)
             // implements it; EdDSA is a fallback for the small set of
             // authenticators that prefer Ed25519 (some Yubikey 5+).
-            pub_key_cred_params: vec![
-                PubKeyCredParam {
+            // Sourced from `ALLOWED_REGISTRATION_ALGS` so the advertise-
+            // and-enforce sides cannot drift.
+            pub_key_cred_params: ALLOWED_REGISTRATION_ALGS
+                .iter()
+                .map(|&alg| PubKeyCredParam {
                     kind: "public-key",
-                    alg: ALG_ES256,
-                },
-                PubKeyCredParam {
-                    kind: "public-key",
-                    alg: ALG_EDDSA,
-                },
-            ],
+                    alg,
+                })
+                .collect(),
             exclude_credentials: exclude,
             timeout: CEREMONY_TIMEOUT_MS,
             authenticator_selection: AuthenticatorSelection {
@@ -249,11 +302,12 @@ impl Webauthn {
             TYPE_REGISTER,
             &state.challenge,
             &self.origin,
+            self.strict_base64,
         )?;
         let cdj_hash = sha256_32(&cdj_raw);
 
         // 2. Parse the attestation object.
-        let att_bytes = b64url_decode(&response.attestation_object)?;
+        let att_bytes = self.decode_b64(&response.attestation_object)?;
         let att = ParsedAttestation::parse(&att_bytes)?;
 
         // 3. rpIdHash check. Note: non-constant-time `!=` is fine here
@@ -286,6 +340,18 @@ impl Webauthn {
         // 6. Parse the COSE public key and verify any attestation
         // statement signed by it.
         let cose = CoseKey::parse(attested.public_key_cose.as_bytes())?;
+
+        // 6a. WebAuthn §7.1 step 19: the credential's alg MUST be one of
+        // the algorithms the RP advertised in pubKeyCredParams. Without
+        // this check a hostile or buggy authenticator could register a
+        // key for any algorithm our COSE parser supports, bypassing the
+        // RP's algorithm policy. We source the allowed list from the
+        // same const start_registration used to build the challenge, so
+        // the advertise side and the enforce side cannot drift.
+        if !ALLOWED_REGISTRATION_ALGS.contains(&cose.alg()) {
+            return Err(Error::UnsupportedAlg(cose.alg()));
+        }
+
         att.verify_statement(&cose, &cdj_hash)?;
 
         // 7. Build the persisted credential.
@@ -404,7 +470,7 @@ impl Webauthn {
         // 1. The asserted credential ID must be one of the ones we
         // told the browser was acceptable (if we gave a non-empty
         // allow list), and it must be the stored one.
-        let asserted_id = CredentialId::from_b64url(&response.id)?;
+        let asserted_id = CredentialId(self.decode_b64(&response.id)?);
         if !state.allow_credentials.is_empty()
             && !state.allow_credentials.iter().any(|c| c == &asserted_id)
         {
@@ -420,11 +486,12 @@ impl Webauthn {
             TYPE_AUTHENTICATE,
             &state.challenge,
             &self.origin,
+            self.strict_base64,
         )?;
         let cdj_hash = sha256_32(&cdj_raw);
 
         // 3. Parse + check authenticator data.
-        let ad_bytes = b64url_decode(&response.authenticator_data)?;
+        let ad_bytes = self.decode_b64(&response.authenticator_data)?;
         let ad = AuthenticatorData::parse(&ad_bytes)?;
         let want_rp_hash = sha256_32(self.rp_id.as_str().as_bytes());
         if ad.rp_id_hash != want_rp_hash {
@@ -439,7 +506,7 @@ impl Webauthn {
 
         // 4. Verify the signature: signedMsg = authData || cdjHash.
         let key = CoseKey::parse(stored.public_key_cose.as_bytes())?;
-        let sig = b64url_decode(&response.signature)?;
+        let sig = self.decode_b64(&response.signature)?;
         let mut msg = Vec::with_capacity(ad_bytes.len() + 32);
         msg.extend_from_slice(&ad_bytes);
         msg.extend_from_slice(&cdj_hash);
@@ -506,6 +573,29 @@ mod tests {
         assert_eq!(Attachment::Platform.as_token(), Some("platform"));
         assert_eq!(Attachment::CrossPlatform.as_token(), Some("cross-platform"),);
         assert_eq!(Attachment::Any.as_token(), None);
+    }
+
+    #[test]
+    fn advertised_algs_match_enforced_algs() {
+        // I1: the algorithm list the browser is offered (in
+        // pubKeyCredParams) MUST be the same one finish_registration
+        // checks. If they drift, an authenticator could legitimately
+        // pick an alg the RP advertised but finish_registration
+        // would reject — or worse, register an alg the RP did not
+        // advertise. This test pins them together.
+        let wa = Webauthn::new("example.com", "Example", "https://example.com");
+        let (chal, _) = wa.start_registration(b"u", "u", "U", &[]);
+        let advertised: Vec<i64> = chal.pub_key_cred_params.iter().map(|p| p.alg).collect();
+        assert_eq!(advertised, ALLOWED_REGISTRATION_ALGS);
+    }
+
+    #[test]
+    fn strict_base64_default_is_lenient() {
+        // M2: builder defaults to lenient (backwards compatible).
+        let wa = Webauthn::new("example.com", "Example", "https://example.com");
+        assert!(!wa.strict_base64);
+        let wa = wa.strict_base64(true);
+        assert!(wa.strict_base64);
     }
 
     #[test]

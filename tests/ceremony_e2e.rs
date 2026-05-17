@@ -345,6 +345,78 @@ fn expired_ceremony_rejected() {
     assert!(matches!(err, Error::CeremonyExpired { .. }), "got {err:?}");
 }
 
+#[test]
+fn strict_base64_rejects_standard_alphabet() {
+    // M2: in strict mode, a credential id encoded with the standard
+    // base64 alphabet (containing `+` or `/`) MUST be rejected even
+    // though the lenient default would accept it.
+    let wa = Webauthn::new(RP_ID, "Example", ORIGIN).strict_base64(true);
+    let mut auth = FakeAuthenticator::new();
+    // Pick a credential id whose base64 encoding contains a char that
+    // differs between the standard and url-safe alphabets. 0xFB → "+"
+    // in standard, "-" in url-safe; 0xFF → "/" vs "_". The first byte
+    // is enough.
+    auth.credential_id = vec![0xFB, 0x01, 0x02, 0x03];
+    let credential = do_register(&wa, &mut auth);
+
+    let (chal, state) = wa.start_authentication(std::slice::from_ref(&credential.id));
+    let auth_data = auth.auth_data_authenticate(None);
+    let (cdj_raw, cdj_b64) = client_data("webauthn.get", &chal.challenge, ORIGIN);
+    let sig = auth.sign_assertion(&auth_data, &cdj_raw);
+
+    // Encode credential id with the STANDARD alphabet (this is what
+    // a buggy `btoa(...)` client would emit). The string contains `+`
+    // which is invalid base64url.
+    let std_alphabet =
+        base64::engine::general_purpose::STANDARD_NO_PAD.encode(&auth.credential_id);
+    assert!(std_alphabet.contains('+'), "test setup: need a '+'");
+
+    let response = AuthenticationResponse {
+        id: std_alphabet,
+        authenticator_data: B64URL.encode(&auth_data),
+        signature: B64URL.encode(&sig),
+        client_data_json: cdj_b64,
+        user_handle: None,
+    };
+
+    let err = wa
+        .finish_authentication(&state, &response, &credential)
+        .unwrap_err();
+    assert!(matches!(err, Error::Base64(_)), "got {err:?}");
+}
+
+#[test]
+fn lenient_base64_accepts_standard_alphabet() {
+    // M2 baseline: the default lenient mode keeps accepting the
+    // standard alphabet so existing buggy clients are not broken
+    // by upgrading the crate without opting into strict mode.
+    let wa = Webauthn::new(RP_ID, "Example", ORIGIN); // strict OFF
+    let mut auth = FakeAuthenticator::new();
+    auth.credential_id = vec![0xFB, 0x01, 0x02, 0x03];
+    let credential = do_register(&wa, &mut auth);
+
+    let (chal, state) = wa.start_authentication(std::slice::from_ref(&credential.id));
+    let auth_data = auth.auth_data_authenticate(None);
+    let (cdj_raw, cdj_b64) = client_data("webauthn.get", &chal.challenge, ORIGIN);
+    let sig = auth.sign_assertion(&auth_data, &cdj_raw);
+
+    let std_alphabet =
+        base64::engine::general_purpose::STANDARD_NO_PAD.encode(&auth.credential_id);
+
+    let response = AuthenticationResponse {
+        id: std_alphabet,
+        authenticator_data: B64URL.encode(&auth_data),
+        signature: B64URL.encode(&sig),
+        client_data_json: cdj_b64,
+        user_handle: None,
+    };
+
+    let outcome = wa
+        .finish_authentication(&state, &response, &credential)
+        .expect("lenient mode must accept standard alphabet");
+    assert_eq!(outcome.new_counter, 1);
+}
+
 // ---------- helper ---------------------------------------------------------
 
 fn do_register(wa: &Webauthn, auth: &mut FakeAuthenticator) -> passkey_auth::PasskeyCredential {
