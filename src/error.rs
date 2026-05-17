@@ -83,7 +83,9 @@ pub enum Error {
     /// assertion is for a different user than the ceremony was
     /// started for — or, when `require_user_handle(true)` is set, an
     /// authenticator that did not emit a user_handle at all.
-    #[error("user handle mismatch: assertion is for a different user than the ceremony was started for")]
+    #[error(
+        "user handle mismatch: assertion is for a different user than the ceremony was started for"
+    )]
     UserHandleMismatch,
 
     /// Internal invariant violation (bug). Should never reach a user.

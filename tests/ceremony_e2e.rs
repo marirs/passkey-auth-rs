@@ -367,8 +367,7 @@ fn strict_base64_rejects_standard_alphabet() {
     // Encode credential id with the STANDARD alphabet (this is what
     // a buggy `btoa(...)` client would emit). The string contains `+`
     // which is invalid base64url.
-    let std_alphabet =
-        base64::engine::general_purpose::STANDARD_NO_PAD.encode(&auth.credential_id);
+    let std_alphabet = base64::engine::general_purpose::STANDARD_NO_PAD.encode(&auth.credential_id);
     assert!(std_alphabet.contains('+'), "test setup: need a '+'");
 
     let response = AuthenticationResponse {
@@ -400,8 +399,7 @@ fn lenient_base64_accepts_standard_alphabet() {
     let (cdj_raw, cdj_b64) = client_data("webauthn.get", &chal.challenge, ORIGIN);
     let sig = auth.sign_assertion(&auth_data, &cdj_raw);
 
-    let std_alphabet =
-        base64::engine::general_purpose::STANDARD_NO_PAD.encode(&auth.credential_id);
+    let std_alphabet = base64::engine::general_purpose::STANDARD_NO_PAD.encode(&auth.credential_id);
 
     let response = AuthenticationResponse {
         id: std_alphabet,
@@ -449,7 +447,8 @@ fn user_handle_match_succeeds() {
     let mut auth = FakeAuthenticator::new();
     let credential = do_register(&wa, &mut auth);
 
-    let (chal, state) = wa.start_authentication_for_user(USER_HANDLE, std::slice::from_ref(&credential.id));
+    let (chal, state) =
+        wa.start_authentication_for_user(USER_HANDLE, std::slice::from_ref(&credential.id));
     let response = make_assertion(&mut auth, &chal.challenge, Some(USER_HANDLE));
 
     wa.finish_authentication(&state, &response, &credential)
@@ -464,7 +463,8 @@ fn user_handle_mismatch_rejected() {
     let mut auth = FakeAuthenticator::new();
     let credential = do_register(&wa, &mut auth);
 
-    let (chal, state) = wa.start_authentication_for_user(USER_HANDLE, std::slice::from_ref(&credential.id));
+    let (chal, state) =
+        wa.start_authentication_for_user(USER_HANDLE, std::slice::from_ref(&credential.id));
     let response = make_assertion(&mut auth, &chal.challenge, Some(OTHER_USER_HANDLE));
 
     let err = wa
@@ -483,7 +483,8 @@ fn user_handle_absent_in_response_is_accepted_by_default() {
     let mut auth = FakeAuthenticator::new();
     let credential = do_register(&wa, &mut auth);
 
-    let (chal, state) = wa.start_authentication_for_user(USER_HANDLE, std::slice::from_ref(&credential.id));
+    let (chal, state) =
+        wa.start_authentication_for_user(USER_HANDLE, std::slice::from_ref(&credential.id));
     let response = make_assertion(&mut auth, &chal.challenge, None);
 
     wa.finish_authentication(&state, &response, &credential)
@@ -500,7 +501,8 @@ fn require_user_handle_rejects_absent_response_handle() {
     let mut auth = FakeAuthenticator::new();
     let credential = do_register(&wa, &mut auth);
 
-    let (chal, state) = wa.start_authentication_for_user(USER_HANDLE, std::slice::from_ref(&credential.id));
+    let (chal, state) =
+        wa.start_authentication_for_user(USER_HANDLE, std::slice::from_ref(&credential.id));
     let response = make_assertion(&mut auth, &chal.challenge, None);
 
     let err = wa
