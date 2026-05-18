@@ -396,7 +396,14 @@ pub(crate) fn now_secs() -> u64 {
 
 /// Stored after a successful registration. The caller persists this
 /// (one row per credential per user) and looks it up at auth time.
-#[derive(Debug, Clone)]
+///
+/// `Serialize + Deserialize` are derived so callers can stash the
+/// whole credential in a single column (e.g. a JSONB blob or a
+/// `SecretString`-wrapped JSON string) without writing a wrapper struct.
+/// The wire shape is the natural serde-of-struct mapping; field-level
+/// derives on `CredentialId` and `CosePublicKey` produce base64-ish
+/// transparent byte vecs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PasskeyCredential {
     pub id: CredentialId,
     pub public_key_cose: CosePublicKey,
@@ -416,7 +423,11 @@ pub struct PasskeyCredential {
 
 /// Successful authentication outcome. Caller updates the stored
 /// credential's `counter` to `new_counter` before responding.
-#[derive(Debug, Clone)]
+///
+/// `Serialize + Deserialize` are derived for symmetry with
+/// [`PasskeyCredential`] — useful when an outer service wants to log
+/// or forward the outcome as JSON.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthSuccess {
     pub credential_id: CredentialId,
     pub new_counter: u32,
@@ -514,5 +525,47 @@ mod tests {
     fn rpid_try_from_url_rejects_empty() {
         assert!(RpId::try_from_url("").is_err());
         assert!(RpId::try_from_url("   ").is_err());
+    }
+
+    // ── PasskeyCredential serde round-trip ────────────────────────────────
+    // Callers persist a `PasskeyCredential` as a single JSON blob (e.g. a
+    // SecretString-wrapped column on a `passkeys` row). The two tests
+    // below pin the wire shape so a future field addition can't silently
+    // break that storage contract.
+
+    fn fixture_credential() -> PasskeyCredential {
+        PasskeyCredential {
+            id: CredentialId(vec![0x01, 0x02, 0x03, 0x04]),
+            public_key_cose: CosePublicKey(vec![0xAA, 0xBB, 0xCC]),
+            counter: 7,
+            transports: vec!["usb".into(), "nfc".into()],
+            aaguid: [0xFE; 16],
+        }
+    }
+
+    #[test]
+    fn passkey_credential_json_round_trips() {
+        let original = fixture_credential();
+        let wire = serde_json::to_string(&original).expect("serialise");
+        let back: PasskeyCredential = serde_json::from_str(&wire).expect("deserialise");
+        assert_eq!(back.id.0, original.id.0);
+        assert_eq!(back.public_key_cose.0, original.public_key_cose.0);
+        assert_eq!(back.counter, original.counter);
+        assert_eq!(back.transports, original.transports);
+        assert_eq!(back.aaguid, original.aaguid);
+    }
+
+    #[test]
+    fn auth_success_json_round_trips() {
+        let original = AuthSuccess {
+            credential_id: CredentialId(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+            new_counter: 42,
+            user_verified: true,
+        };
+        let wire = serde_json::to_string(&original).expect("serialise");
+        let back: AuthSuccess = serde_json::from_str(&wire).expect("deserialise");
+        assert_eq!(back.credential_id.0, original.credential_id.0);
+        assert_eq!(back.new_counter, original.new_counter);
+        assert_eq!(back.user_verified, original.user_verified);
     }
 }
