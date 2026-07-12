@@ -386,10 +386,20 @@ impl AuthenticationState {
 /// Saturates to 0 if the system clock is before the Unix epoch (which
 /// will never happen on a sane host) so the helpers never panic.
 pub(crate) fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    // std::time::SystemTime::now() aborts on wasm32-unknown-unknown (no
+    // wall-clock syscall — e.g. Cloudflare Workers), so read the JS Date
+    // clock there and fall back to SystemTime on every other target.
+    #[cfg(target_arch = "wasm32")]
+    {
+        (js_sys::Date::now() / 1000.0) as u64
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
 }
 
 // ---------- Outcomes ----------------------------------------------------

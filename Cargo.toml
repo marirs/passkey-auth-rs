@@ -45,6 +45,11 @@ url           = "2"
 x509-cert     = { version = "0.2", features = ["std"] }
 const-oid     = "0.9"
 
+# On wasm32-unknown-unknown (e.g. Cloudflare Workers) std has no wall clock,
+# so now_secs() reads the JS Date API instead of std::time::SystemTime.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+
 [dev-dependencies]
 # Known-vector regression tests live under tests/.
 hex           = "0.4"
