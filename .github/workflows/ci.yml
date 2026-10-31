@@ -39,17 +39,11 @@ jobs:
           - { os: macos,   arch: aarch64, runner: macos-15 }
           - { os: windows, arch: x86_64,  runner: windows-2022 }
     steps:
-      - uses: actions/checkout@v4
-
-      # actions-rust-lang/setup-rust-toolchain handles the PATH/shim
-      # issue that dtolnay/rust-toolchain has on macOS aarch64 runners
-      # (where the pre-installed rustup-init shadows the freshly
-      # installed cargo). Also wraps Swatinem/rust-cache internally.
+      - uses: actions/checkout@v7
       - name: Install Rust (stable)
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           toolchain: stable
-
       - name: Build
         run: cargo build --all-targets --verbose
 
@@ -66,8 +60,8 @@ jobs:
     name: rustfmt
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           toolchain: stable
           components: rustfmt
@@ -80,8 +74,8 @@ jobs:
     name: clippy
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           toolchain: stable
           components: clippy
@@ -96,10 +90,10 @@ jobs:
     name: MSRV (1.85)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          toolchain: "1.85"
+          toolchain: '1.85'
       - run: cargo build --all-targets
 
   # -------------------------------------------------------------------------
@@ -112,8 +106,8 @@ jobs:
     env:
       RUSTDOCFLAGS: -D warnings
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           toolchain: stable
       - run: cargo doc --no-deps --all-features
