@@ -6,11 +6,14 @@
 //! [`RegistrationResponse`] / [`AuthenticationResponse`] so a Rocket
 //! handler can deserialize directly off the request body.
 
-use base64::Engine;
+use std::borrow::Cow;
+
+use base64::engine::GeneralPurpose;
 use base64::engine::general_purpose::{
     STANDARD as B64STD, STANDARD_NO_PAD as B64STD_NO_PAD, URL_SAFE as B64URL_PAD,
     URL_SAFE_NO_PAD as B64URL,
 };
+use base64::{DecodeSliceError, Engine};
 use rand::Rng as _;
 use serde::{Deserialize, Serialize};
 
@@ -193,6 +196,40 @@ pub(crate) fn b64url_decode(s: &str) -> Result<Vec<u8>> {
 /// emit the right thing.
 pub(crate) fn b64url_decode_strict(s: &str) -> Result<Vec<u8>> {
     B64URL.decode(s).map_err(|e| Error::Base64(e.to_string()))
+}
+
+/// Decodes `s` into `buf` with the alphabets of [`b64url_decode`] (only
+/// url-safe-no-pad when `strict`), so short fields such as challenges,
+/// credential IDs and user handles need no allocation. A value too long
+/// for `buf` falls back to an allocated buffer, with the same result.
+pub(crate) fn b64url_decode_into<'b>(
+    s: &str,
+    buf: &'b mut [u8],
+    strict: bool,
+) -> Result<Cow<'b, [u8]>> {
+    let engines: &[&GeneralPurpose] = if strict {
+        &[&B64URL]
+    } else {
+        &[&B64URL, &B64URL_PAD, &B64STD_NO_PAD, &B64STD]
+    };
+    let mut error = None;
+    for engine in engines {
+        match engine.decode_slice(s, buf) {
+            Ok(len) => return Ok(Cow::Borrowed(&buf[..len])),
+            Err(DecodeSliceError::DecodeError(e)) => error = Some(e),
+            Err(DecodeSliceError::OutputSliceTooSmall) => {
+                let decode = if strict {
+                    b64url_decode_strict
+                } else {
+                    b64url_decode
+                };
+                return decode(s).map(Cow::Owned);
+            }
+        }
+    }
+    Err(Error::Base64(
+        error.map(|e| e.to_string()).unwrap_or_default(),
+    ))
 }
 
 // ---------- Wire structs (request bodies) -------------------------------
@@ -477,6 +514,37 @@ mod tests {
     #[test]
     fn rejects_garbage() {
         assert!(b64url_decode("!!!not-base64!!!").is_err());
+    }
+
+    #[test]
+    fn decode_into_matches_decode() {
+        for encoded in [
+            B64URL.encode(SAMPLE),
+            B64URL_PAD.encode(SAMPLE),
+            B64STD_NO_PAD.encode(SAMPLE),
+            B64STD.encode(SAMPLE),
+            "!!!not-base64!!!".to_owned(),
+        ] {
+            for strict in [false, true] {
+                let mut buf = [0u8; 64];
+                let into = b64url_decode_into(&encoded, &mut buf, strict).map(Cow::into_owned);
+                let decode = if strict {
+                    b64url_decode_strict
+                } else {
+                    b64url_decode
+                };
+                assert_eq!(
+                    into.ok(),
+                    decode(&encoded).ok(),
+                    "{encoded} strict={strict}"
+                );
+            }
+        }
+        let long = B64URL.encode([7u8; 200]);
+        let mut small = [0u8; 8];
+        let decoded = b64url_decode_into(&long, &mut small, true).unwrap();
+        assert!(matches!(decoded, Cow::Owned(_)));
+        assert_eq!(&*decoded, &[7u8; 200][..]);
     }
 
     // ---- RpId ----------------------------------------------------------

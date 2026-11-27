@@ -1,0 +1,54 @@
+[package]
+name = "passkey-auth-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+passkey-auth = { path = "..", features = ["__internals", "pqc"] }
+
+# Keeps the fuzz crate out of any parent workspace.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "attestation_object"
+path = "fuzz_targets/attestation_object.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cose_key"
+path = "fuzz_targets/cose_key.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "authenticator_data"
+path = "fuzz_targets/authenticator_data.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "client_data_json"
+path = "fuzz_targets/client_data_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "attestation_cert"
+path = "fuzz_targets/attestation_cert.rs"
+test = false
+doc = false
+bench = false

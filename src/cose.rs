@@ -14,10 +14,10 @@
 //! off the curve, an RSA modulus outside 2048-4096 bits, a truncated
 //! ML-DSA key) is refused at registration instead of at the first sign-in.
 
-use ciborium::value::Value as CborValue;
 use rsa::BoxedUint;
 use sha2::Sha256;
 
+use crate::cbor::{self, Value};
 use crate::error::{Error, Result};
 
 pub(crate) const ALG_ES256: i64 = -7;
@@ -75,39 +75,45 @@ impl CoseKey {
     /// Parses a COSE_Key CBOR blob (as stored by the caller or as carried
     /// in `attestedCredentialData.credentialPublicKey`).
     pub(crate) fn parse(bytes: &[u8]) -> Result<Self> {
-        let value: CborValue =
-            ciborium::de::from_reader(bytes).map_err(|e| Error::Cbor(format!("cose: {e}")))?;
-        let CborValue::Map(entries) = value else {
-            return Err(Error::Cbor("cose: top-level not a map".into()));
-        };
+        let map = cbor::decode_exact(bytes)
+            .map_err(|e| Error::Cbor(format!("cose: {e}")))?
+            .as_map()
+            .ok_or_else(|| Error::Cbor("cose: top-level not a map".into()))?;
 
-        // RFC 9052 §3: a map that repeats a label MUST NOT be processed.
-        for (i, (label, _)) in entries.iter().enumerate() {
-            if entries[..i].iter().any(|(earlier, _)| earlier == label) {
+        // Slots for the labels this parser reads, in LABELS order. RFC 9052
+        // §3: a map that repeats a label MUST NOT be processed.
+        const LABELS: [i64; 5] = [KTY, ALG, PARAM_1, PARAM_2, PARAM_3];
+        let mut fields: [Option<Value<'_>>; 5] = [None; 5];
+        for (key, value) in map {
+            let Some(slot) = key
+                .as_i64()
+                .and_then(|k| LABELS.iter().position(|&l| l == k))
+            else {
+                continue; // a label no key type here uses
+            };
+            if fields[slot].replace(value).is_some() {
                 return Err(Error::Cbor("cose: duplicate map label".into()));
             }
         }
         let field = |label: i64| {
-            entries
+            LABELS
                 .iter()
-                .find(|(k, _)| int_of(k) == Some(label))
-                .map(|(_, v)| v)
+                .position(|&l| l == label)
+                .and_then(|i| fields[i])
         };
 
         let kty = field(KTY)
-            .ok_or_else(|| Error::Cbor("cose: missing kty".into()))
-            .and_then(|v| {
-                int_of(v).ok_or_else(|| Error::Cbor("cose: kty not an integer".into()))
-            })?;
+            .ok_or_else(|| Error::Cbor("cose: missing kty".into()))?
+            .as_i64()
+            .ok_or_else(|| Error::Cbor("cose: kty not an integer".into()))?;
         let alg = field(ALG)
-            .ok_or_else(|| Error::Cbor("cose: missing alg".into()))
-            .and_then(|v| {
-                int_of(v).ok_or_else(|| Error::Cbor("cose: alg not an integer".into()))
-            })?;
-        let int_param = |label| field(label).and_then(int_of);
+            .ok_or_else(|| Error::Cbor("cose: missing alg".into()))?
+            .as_i64()
+            .ok_or_else(|| Error::Cbor("cose: alg not an integer".into()))?;
+        let int_param = |label| field(label).and_then(|v| v.as_i64());
         let bytes_param = |label, name: &str| {
             field(label)
-                .and_then(bytes_of)
+                .and_then(|v| v.as_bytes())
                 .ok_or_else(|| Error::Cbor(format!("cose: missing {name}")))
         };
 
@@ -195,25 +201,11 @@ fn strip_leading_zeros(bytes: &[u8]) -> &[u8] {
     &bytes[start..]
 }
 
-/// Integer value of a CBOR item, or `None` when it is not an integer or
-/// does not fit in `i64` (no truncation: 2^64 - 7 must not read as -7).
-fn int_of(v: &CborValue) -> Option<i64> {
-    match v {
-        CborValue::Integer(i) => i64::try_from(i128::from(*i)).ok(),
-        _ => None,
-    }
-}
-
-fn bytes_of(v: &CborValue) -> Option<&[u8]> {
-    match v {
-        CborValue::Bytes(b) => Some(b),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use ciborium::value::Value as CborValue;
 
     fn encode(entries: Vec<(CborValue, CborValue)>) -> Vec<u8> {
         let mut out = Vec::new();

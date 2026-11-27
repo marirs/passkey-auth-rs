@@ -213,7 +213,7 @@ fn counter_replay_rejected() {
     let credential = do_register(&wa, &mut auth);
 
     // Pretend the user already authenticated up to counter=5.
-    let mut stored = credential.clone();
+    let mut stored = credential;
     stored.counter = 5;
 
     // Authenticator (somehow) emits counter=5 - equal, not strictly greater.

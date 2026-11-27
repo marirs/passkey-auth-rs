@@ -33,6 +33,7 @@
 
 mod attestation;
 mod auth_data;
+mod cbor;
 mod ceremony;
 mod client_data;
 mod cose;

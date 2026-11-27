@@ -2,7 +2,7 @@
 //! through the public `Webauthn` API.
 //!
 //! ```text
-//! cargo bench --bench verify
+//! cargo bench --bench verify --features pqc
 //! ```
 
 #[path = "../tests/support/mod.rs"]
@@ -16,7 +16,9 @@ use support::{Alg, Authenticator, ORIGIN, RP_ID};
 
 fn verify(c: &mut Criterion) {
     let wa = Webauthn::new(RP_ID, "Example", ORIGIN);
-    for alg in Alg::CLASSICAL {
+    #[cfg(feature = "pqc")]
+    let wa = wa.allow_ml_dsa(true);
+    for alg in Alg::all() {
         let mut authenticator = Authenticator::new(alg, 7);
 
         // States are created per benchmark so none outlives the 5 minute

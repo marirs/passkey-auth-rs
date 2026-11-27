@@ -15,21 +15,27 @@
 //! signed message (any pretty-printing or field reordering would
 //! break verification).
 
+use std::borrow::Cow;
+
 use serde::Deserialize;
 
 use crate::error::{Error, Result};
-use crate::types::{Challenge, b64url_decode, b64url_decode_strict};
+use crate::types::{Challenge, b64url_decode_into};
 
 /// Type tags the spec puts in `clientDataJSON.type`.
 pub(crate) const TYPE_REGISTER: &str = "webauthn.create";
 pub(crate) const TYPE_AUTHENTICATE: &str = "webauthn.get";
 
+/// The fields this crate checks. Strings borrow from the JSON unless they
+/// contain escapes.
 #[derive(Debug, Deserialize)]
-struct Parsed {
-    #[serde(rename = "type")]
-    kind: String,
-    challenge: String,
-    origin: String,
+struct Parsed<'a> {
+    #[serde(rename = "type", borrow)]
+    kind: Cow<'a, str>,
+    #[serde(borrow)]
+    challenge: Cow<'a, str>,
+    #[serde(borrow)]
+    origin: Cow<'a, str>,
     #[serde(rename = "crossOrigin", default)]
     cross_origin: bool,
     #[serde(rename = "topOrigin")]
@@ -50,41 +56,38 @@ const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
 ///
 /// Returns the *raw decoded bytes* (the canonical UTF-8 JSON the
 /// authenticator hashed) so callers can SHA-256 them for the signed
-/// message in authentication.
-pub(crate) fn validate(
+/// message. They are decoded into `buf` when they fit.
+pub(crate) fn validate<'b>(
     encoded: &str,
+    buf: &'b mut [u8],
     expected_type: &str,
     expected_challenge: &Challenge,
     expected_origin: &str,
     strict: bool,
-) -> Result<Vec<u8>> {
-    let decode = if strict {
-        b64url_decode_strict
-    } else {
-        b64url_decode
-    };
-    let raw = decode(encoded)?;
+) -> Result<Cow<'b, [u8]>> {
+    let raw = b64url_decode_into(encoded, buf, strict)?;
     check(
         &raw,
         expected_type,
         expected_challenge,
         expected_origin,
-        decode,
+        strict,
     )?;
     Ok(raw)
 }
 
-/// Runs the `clientDataJSON` checks on the decoded JSON bytes. `decode`
-/// is the base64 decoder for the inner `challenge` field.
+/// Runs the `clientDataJSON` checks on the decoded JSON bytes. `strict`
+/// selects the base64 decoder for the inner `challenge` field.
 pub(crate) fn check(
     raw: &[u8],
     expected_type: &str,
     expected_challenge: &Challenge,
     expected_origin: &str,
-    decode: fn(&str) -> Result<Vec<u8>>,
+    strict: bool,
 ) -> Result<()> {
     let json = raw.strip_prefix(UTF8_BOM).unwrap_or(raw);
-    let p: Parsed = serde_json::from_slice(json).map_err(|e| Error::ClientData(e.to_string()))?;
+    let p: Parsed<'_> =
+        serde_json::from_slice(json).map_err(|e| Error::ClientData(e.to_string()))?;
 
     if p.kind != expected_type {
         return Err(Error::ClientDataType {
@@ -93,19 +96,20 @@ pub(crate) fn check(
             } else {
                 "webauthn.get"
             },
-            actual: p.kind,
+            actual: p.kind.into_owned(), // copy: error path only
         });
     }
 
-    let got_challenge = decode(&p.challenge)?;
-    if got_challenge != expected_challenge.as_bytes() {
+    // Challenges this crate issues are 32 bytes; longer ones still decode.
+    let mut buf = [0u8; 64];
+    if *b64url_decode_into(&p.challenge, &mut buf, strict)? != *expected_challenge.as_bytes() {
         return Err(Error::ChallengeMismatch);
     }
 
     if p.origin != expected_origin {
         return Err(Error::OriginMismatch {
-            expected: expected_origin.to_owned(),
-            actual: p.origin,
+            expected: expected_origin.to_owned(), // copy: error path only
+            actual: p.origin.into_owned(),
         });
     }
 
@@ -138,7 +142,16 @@ mod tests {
     fn happy_path_register() {
         let chal = Challenge(vec![1, 2, 3, 4]);
         let cdj = make_cdj("webauthn.create", &chal.to_b64url(), "https://example.com");
-        let raw = validate(&cdj, TYPE_REGISTER, &chal, "https://example.com", false).unwrap();
+        let mut buf = [0; 1024];
+        let raw = validate(
+            &cdj,
+            &mut buf,
+            TYPE_REGISTER,
+            &chal,
+            "https://example.com",
+            false,
+        )
+        .unwrap();
         // Returned raw is the decoded JSON, suitable for hashing.
         assert!(raw.starts_with(b"{\"type\":\"webauthn.create\""));
     }
@@ -147,7 +160,15 @@ mod tests {
     fn wrong_type_rejected() {
         let chal = Challenge(vec![1, 2, 3, 4]);
         let cdj = make_cdj("webauthn.get", &chal.to_b64url(), "https://example.com");
-        let err = validate(&cdj, TYPE_REGISTER, &chal, "https://example.com", false).unwrap_err();
+        let err = validate(
+            &cdj,
+            &mut [0; 1024],
+            TYPE_REGISTER,
+            &chal,
+            "https://example.com",
+            false,
+        )
+        .unwrap_err();
         assert!(matches!(err, Error::ClientDataType { .. }));
     }
 
@@ -156,7 +177,15 @@ mod tests {
         let chal = Challenge(vec![1, 2, 3, 4]);
         let bad = Challenge(vec![9, 9, 9]);
         let cdj = make_cdj("webauthn.create", &bad.to_b64url(), "https://example.com");
-        let err = validate(&cdj, TYPE_REGISTER, &chal, "https://example.com", false).unwrap_err();
+        let err = validate(
+            &cdj,
+            &mut [0; 1024],
+            TYPE_REGISTER,
+            &chal,
+            "https://example.com",
+            false,
+        )
+        .unwrap_err();
         assert!(matches!(err, Error::ChallengeMismatch));
     }
 
@@ -168,13 +197,7 @@ mod tests {
 
     fn run(raw: &[u8]) -> Result<()> {
         let chal = Challenge(vec![1, 2, 3, 4]);
-        check(
-            raw,
-            TYPE_AUTHENTICATE,
-            &chal,
-            "https://example.com",
-            b64url_decode,
-        )
+        check(raw, TYPE_AUTHENTICATE, &chal, "https://example.com", false)
     }
 
     #[test]
@@ -201,7 +224,15 @@ mod tests {
     fn wrong_origin_rejected() {
         let chal = Challenge(vec![1, 2, 3, 4]);
         let cdj = make_cdj("webauthn.create", &chal.to_b64url(), "https://evil.com");
-        let err = validate(&cdj, TYPE_REGISTER, &chal, "https://example.com", false).unwrap_err();
+        let err = validate(
+            &cdj,
+            &mut [0; 1024],
+            TYPE_REGISTER,
+            &chal,
+            "https://example.com",
+            false,
+        )
+        .unwrap_err();
         assert!(matches!(err, Error::OriginMismatch { .. }));
     }
 }

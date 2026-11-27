@@ -51,6 +51,9 @@ impl AttestationCert {
     /// than P-256 ECDSA and 2048-4096 bit RSA, and a malformed AAGUID
     /// extension.
     pub(crate) fn from_der(der: &[u8]) -> Result<Self> {
+        // x509-cert decodes into owned structures. Attestation with x5c is
+        // rare (browsers send `none` when the RP asks for it), so this cold
+        // path keeps the simple API.
         let cert =
             Certificate::from_der(der).map_err(|e| Error::Cbor(format!("x509 parse: {e}")))?;
         let tbs = cert.tbs_certificate();

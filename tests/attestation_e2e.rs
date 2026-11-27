@@ -317,7 +317,7 @@ fn packed_x5c_happy_path() {
                 (CborValue::Text("sig".into()), CborValue::Bytes(sig_der)),
                 (
                     CborValue::Text("x5c".into()),
-                    CborValue::Array(vec![CborValue::Bytes(cert.cert_der.clone())]),
+                    CborValue::Array(vec![CborValue::Bytes(cert.cert_der)]),
                 ),
             ]),
         ),
@@ -377,7 +377,7 @@ fn packed_x5c_aaguid_mismatch_rejected() {
                 (CborValue::Text("sig".into()), CborValue::Bytes(sig_der)),
                 (
                     CborValue::Text("x5c".into()),
-                    CborValue::Array(vec![CborValue::Bytes(cert.cert_der.clone())]),
+                    CborValue::Array(vec![CborValue::Bytes(cert.cert_der)]),
                 ),
             ]),
         ),
@@ -440,7 +440,7 @@ fn packed_x5c_bad_signature_rejected() {
                 (CborValue::Text("sig".into()), CborValue::Bytes(sig_der)),
                 (
                     CborValue::Text("x5c".into()),
-                    CborValue::Array(vec![CborValue::Bytes(cert.cert_der.clone())]),
+                    CborValue::Array(vec![CborValue::Bytes(cert.cert_der)]),
                 ),
             ]),
         ),
@@ -504,7 +504,7 @@ fn fido_u2f_happy_path() {
                 (CborValue::Text("sig".into()), CborValue::Bytes(sig_der)),
                 (
                     CborValue::Text("x5c".into()),
-                    CborValue::Array(vec![CborValue::Bytes(cert.cert_der.clone())]),
+                    CborValue::Array(vec![CborValue::Bytes(cert.cert_der)]),
                 ),
             ]),
         ),
@@ -566,7 +566,7 @@ fn fido_u2f_wrong_credential_pubkey_rejected() {
                 (CborValue::Text("sig".into()), CborValue::Bytes(sig_der)),
                 (
                     CborValue::Text("x5c".into()),
-                    CborValue::Array(vec![CborValue::Bytes(cert.cert_der.clone())]),
+                    CborValue::Array(vec![CborValue::Bytes(cert.cert_der)]),
                 ),
             ]),
         ),
@@ -637,7 +637,7 @@ fn packed_x5c_malformed_aaguid_rejected() {
                 (CborValue::Text("sig".into()), CborValue::Bytes(sig_der)),
                 (
                     CborValue::Text("x5c".into()),
-                    CborValue::Array(vec![CborValue::Bytes(cert.cert_der.clone())]),
+                    CborValue::Array(vec![CborValue::Bytes(cert.cert_der)]),
                 ),
             ]),
         ),

@@ -27,10 +27,8 @@
 //! set the extensions map is the rest of the data, with ED clear nothing
 //! follows the attested credential data.
 
-use ciborium::value::Value as CborValue;
-
+use crate::cbor::{Decoder, Value};
 use crate::error::{Error, Result};
-use crate::types::{CosePublicKey, CredentialId};
 
 pub(crate) const FLAG_UP: u8 = 1 << 0;
 pub(crate) const FLAG_UV: u8 = 1 << 2;
@@ -39,63 +37,57 @@ pub(crate) const FLAG_BS: u8 = 1 << 4;
 pub(crate) const FLAG_AT: u8 = 1 << 6;
 pub(crate) const FLAG_ED: u8 = 1 << 7;
 
+/// Longest credential ID WebAuthn-3 §7.1 step 26 accepts.
+const MAX_CREDENTIAL_ID_LEN: usize = 1023;
+
+/// Parsed authenticator data, borrowing from the input bytes.
 #[derive(Debug)]
-pub(crate) struct AuthenticatorData {
-    pub rp_id_hash: [u8; 32],
+pub(crate) struct AuthenticatorData<'a> {
+    pub rp_id_hash: &'a [u8; 32],
     pub flags: u8,
     pub sign_count: u32,
     /// Present when the AT flag is set (registration; sometimes auth).
-    pub attested: Option<AttestedCredentialData>,
+    pub attested: Option<AttestedCredentialData<'a>>,
 }
 
 #[derive(Debug)]
-pub(crate) struct AttestedCredentialData {
-    pub aaguid: [u8; 16],
-    pub credential_id: CredentialId,
-    pub public_key_cose: CosePublicKey,
+pub(crate) struct AttestedCredentialData<'a> {
+    pub aaguid: &'a [u8; 16],
+    pub credential_id: &'a [u8],
+    /// The COSE_Key bytes exactly as the authenticator encoded them.
+    pub public_key_cose: &'a [u8],
 }
 
-impl AuthenticatorData {
-    /// Strict binary parse. Returns the parsed struct AND a borrow of
-    /// any unconsumed bytes (extensions / trailing data) so callers
-    /// can use them when computing the signed message.
-    pub(crate) fn parse(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() < 37 {
-            return Err(Error::AuthData("too short (need >= 37 bytes)"));
-        }
-        let mut rp_id_hash = [0u8; 32];
-        rp_id_hash.copy_from_slice(&bytes[0..32]);
-        let flags = bytes[32];
-        let sign_count = u32::from_be_bytes([bytes[33], bytes[34], bytes[35], bytes[36]]);
+impl<'a> AuthenticatorData<'a> {
+    /// Strict binary parse: every field must be present and the data must
+    /// end where the last field ends.
+    pub(crate) fn parse(bytes: &'a [u8]) -> Result<Self> {
+        const TOO_SHORT: Error = Error::AuthData("too short (need >= 37 bytes)");
+        let (rp_id_hash, rest) = bytes.split_first_chunk::<32>().ok_or(TOO_SHORT)?;
+        let (&[flags], rest) = rest.split_first_chunk::<1>().ok_or(TOO_SHORT)?;
+        let (count, mut rest) = rest.split_first_chunk::<4>().ok_or(TOO_SHORT)?;
+        let sign_count = u32::from_be_bytes(*count);
 
-        let mut pos = 37_usize;
         let attested = if flags & FLAG_AT != 0 {
-            if bytes.len() < pos + 18 {
-                return Err(Error::AuthData("attestedCredentialData truncated header"));
-            }
-            let mut aaguid = [0u8; 16];
-            aaguid.copy_from_slice(&bytes[pos..pos + 16]);
-            pos += 16;
-            let cred_id_len = u16::from_be_bytes([bytes[pos], bytes[pos + 1]]) as usize;
-            pos += 2;
-            if cred_id_len > 1023 {
+            let (aaguid, tail) = rest
+                .split_first_chunk::<16>()
+                .ok_or(Error::AuthData("attestedCredentialData truncated header"))?;
+            let (id_len, tail) = tail
+                .split_first_chunk::<2>()
+                .ok_or(Error::AuthData("attestedCredentialData truncated header"))?;
+            let id_len = usize::from(u16::from_be_bytes(*id_len));
+            if id_len > MAX_CREDENTIAL_ID_LEN {
                 return Err(Error::AuthData("credentialIdLength > 1023"));
             }
-            if bytes.len() < pos + cred_id_len {
-                return Err(Error::AuthData("credentialId truncated"));
-            }
-            let credential_id = CredentialId(bytes[pos..pos + cred_id_len].to_vec());
-            pos += cred_id_len;
-
-            // credentialPublicKey is a CBOR map; we need to determine
-            // how many bytes it consumes so we can leave any extensions
-            // alone. ciborium can tell us by deserializing once into a
-            // CborValue and re-serializing to bytes.
-            let tail = &bytes[pos..];
-            let cose_len = cose_blob_length(tail)?;
-            let public_key_cose = CosePublicKey(tail[..cose_len].to_vec());
-            pos += cose_len;
-
+            let (credential_id, tail) = tail
+                .split_at_checked(id_len)
+                .ok_or(Error::AuthData("credentialId truncated"))?;
+            // credentialPublicKey is one CBOR item; its encoded length is
+            // where the extensions (if any) begin.
+            let mut decoder = Decoder::new(tail);
+            decoder.value()?;
+            let (public_key_cose, tail) = tail.split_at(decoder.position());
+            rest = tail;
             Some(AttestedCredentialData {
                 aaguid,
                 credential_id,
@@ -109,15 +101,16 @@ impl AuthenticatorData {
         // is used, but the map must parse and fill the data exactly. With
         // ED clear, nothing may follow (WebAuthn-3 §6.1).
         if flags & FLAG_ED != 0 {
-            let mut cur = std::io::Cursor::new(&bytes[pos..]);
-            let extensions: CborValue = ciborium::de::from_reader(&mut cur)
+            let mut decoder = Decoder::new(rest);
+            let extensions = decoder
+                .value()
                 .map_err(|_| Error::AuthData("extensions CBOR parse failed"))?;
-            if !extensions.is_map() {
+            if !matches!(extensions, Value::Map(_)) {
                 return Err(Error::AuthData("extensions are not a CBOR map"));
             }
-            pos += cur.position() as usize;
+            rest = &rest[decoder.position()..];
         }
-        if pos != bytes.len() {
+        if !rest.is_empty() {
             return Err(Error::AuthData("trailing bytes after authenticator data"));
         }
 
@@ -146,23 +139,6 @@ impl AuthenticatorData {
     }
 }
 
-/// Read a single CBOR item from `data` and return the byte length it
-/// occupies. ciborium does not expose a direct "how many bytes did you
-/// consume" API, so we wrap the slice in a `std::io::Cursor` and read
-/// its `position()` after the parse. Cursor's position-tracking is a
-/// documented part of std::io, so this is robust to any future
-/// internal-buffering change in ciborium (whereas the earlier
-/// `data.len() - cur.len()` trick relied on an implementation detail of
-/// the `Read for &[u8]` impl — fine today, fragile tomorrow).
-fn cose_blob_length(data: &[u8]) -> Result<usize> {
-    let mut cur = std::io::Cursor::new(data);
-    let _: CborValue =
-        ciborium::de::from_reader(&mut cur).map_err(|e| Error::Cbor(format!("cose key: {e}")))?;
-    // Cursor::position() is u64 but our data is a single AuthData blob
-    // (capped at ~1 KiB by spec); the conversion cannot truncate.
-    Ok(cur.position() as usize)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,7 +151,7 @@ mod tests {
         buf.push(0x05); // UP | UV
         buf.extend_from_slice(&42u32.to_be_bytes());
         let ad = AuthenticatorData::parse(&buf).unwrap();
-        assert_eq!(ad.rp_id_hash, [0xAB; 32]);
+        assert_eq!(ad.rp_id_hash, &[0xAB; 32]);
         assert!(ad.user_present());
         assert!(ad.user_verified());
         assert_eq!(ad.sign_count, 42);
@@ -197,9 +173,9 @@ mod tests {
         buf.extend_from_slice(&[0xa1, 0x01, 0x02]);
         let ad = AuthenticatorData::parse(&buf).unwrap();
         let att = ad.attested.unwrap();
-        assert_eq!(att.aaguid, [0xCD; 16]);
-        assert_eq!(att.credential_id.as_bytes(), &[1, 2, 3]);
-        assert_eq!(att.public_key_cose.as_bytes(), &[0xa1, 0x01, 0x02]);
+        assert_eq!(att.aaguid, &[0xCD; 16]);
+        assert_eq!(att.credential_id, &[1, 2, 3]);
+        assert_eq!(att.public_key_cose, &[0xa1, 0x01, 0x02]);
     }
 
     #[test]
@@ -248,7 +224,8 @@ mod tests {
             (FLAG_BE | FLAG_BS, true),
             (FLAG_BS, false),
         ] {
-            let ad = AuthenticatorData::parse(&header(FLAG_UP | flags)).unwrap();
+            let data = header(FLAG_UP | flags);
+            let ad = AuthenticatorData::parse(&data).unwrap();
             assert_eq!(ad.check_backup_flags().is_ok(), ok, "flags {flags:#04x}");
         }
     }

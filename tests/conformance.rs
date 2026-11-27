@@ -109,7 +109,7 @@ fn signature_from_another_key_rejected_every_algorithm() {
         if alg == Alg::Rs256 {
             impostor = Authenticator::with_key(rsa_key(RSA_4096), 13);
         }
-        impostor.credential_id = authenticator.credential_id.clone();
+        impostor.credential_id = authenticator.credential_id;
         let err = authenticate(&wa, &mut impostor, &credential).unwrap_err();
         assert!(
             matches!(err, Error::BadSignature),

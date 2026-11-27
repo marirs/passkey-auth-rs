@@ -4,6 +4,13 @@
 //! current thread while `finish_registration` or `finish_authentication`
 //! runs. Inputs are built before counting starts, so the numbers cover
 //! the crate's own work only. Run with `--nocapture` to print them.
+//!
+//! For ES256 and EdDSA every allocation is the crate's own, and the test
+//! pins them: registration allocates the decoded attestationObject and the
+//! returned credential (ID, COSE key, transports), and authentication
+//! only the credential ID in the returned `AuthSuccess`. RS256 and ML-DSA
+//! add the allocations of the `rsa` and `ml-dsa` crates, which are printed
+//! but not pinned.
 
 mod support;
 
@@ -50,7 +57,9 @@ fn counted<T>(f: impl FnOnce() -> T) -> (T, usize) {
 #[test]
 fn allocations_per_verify_path() {
     let wa = Webauthn::new(RP_ID, "Example", ORIGIN);
-    for alg in Alg::CLASSICAL {
+    #[cfg(feature = "pqc")]
+    let wa = wa.allow_ml_dsa(true);
+    for alg in Alg::all() {
         let mut authenticator = Authenticator::new(alg, 7);
         let (challenge, state) = wa.start_registration(b"user-1", "alice", "Alice", &[]);
         let response = authenticator.register(&challenge);
@@ -67,5 +76,17 @@ fn allocations_per_verify_path() {
             "allocations {}: finish_registration {registration}, finish_authentication {authentication}",
             alg.name()
         );
+        if matches!(alg, Alg::Es256 | Alg::EdDsa) {
+            assert!(
+                registration <= 5,
+                "{} registration: {registration}",
+                alg.name()
+            );
+            assert!(
+                authentication <= 1,
+                "{} authentication: {authentication}",
+                alg.name()
+            );
+        }
     }
 }

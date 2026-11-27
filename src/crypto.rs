@@ -7,18 +7,20 @@
 //!   * RS256: RSASSA-PKCS1-v1_5 with SHA-256, signature as long as the modulus
 //!   * ML-DSA-44/65/87 (`pqc` feature): FIPS 204 pure mode, empty context
 //!
-//! WebAuthn signs `authenticatorData || SHA-256(clientDataJSON)`.
+//! WebAuthn signs `authenticatorData || SHA-256(clientDataJSON)`. The
+//! message arrives as its parts and is hashed part by part, so it is never
+//! concatenated into a new buffer.
 
-use ed25519_dalek::Verifier as _;
 use p256::ecdsa::Signature as EsSig;
+use rsa::signature::MultipartVerifier as _;
 
 use crate::cose::CoseKey;
 use crate::error::{Error, Result};
 
-/// Verifies `sig` over `msg` with `key`. Every failure (malformed
-/// signature, wrong key) is [`Error::BadSignature`], so the error does not
-/// tell a client which check failed.
-pub(crate) fn verify(key: &CoseKey, msg: &[u8], sig: &[u8]) -> Result<()> {
+/// Verifies `sig` over the concatenation of `msg` with `key`. Every failure
+/// (malformed signature, wrong key) is [`Error::BadSignature`], so the
+/// error does not tell a client which check failed.
+pub(crate) fn verify(key: &CoseKey, msg: &[&[u8]], sig: &[u8]) -> Result<()> {
     let ok = match key {
         // Signature malleability (high-S): ECDSA admits (r, s) and
         // (r, n - s) for the same message. WebAuthn does not require
@@ -26,16 +28,23 @@ pub(crate) fn verify(key: &CoseKey, msg: &[u8], sig: &[u8]) -> Result<()> {
         // Yubico java-webauthn-server accept both. The single-use
         // challenge makes the malleable variant useless for replay, so
         // either form is accepted here.
-        CoseKey::Es256(vk) => EsSig::from_der(sig).is_ok_and(|s| vk.verify(msg, &s).is_ok()),
-        CoseKey::Ed25519(vk) => {
-            ed25519_dalek::Signature::from_slice(sig).is_ok_and(|s| vk.verify(msg, &s).is_ok())
+        CoseKey::Es256(vk) => {
+            EsSig::from_der(sig).is_ok_and(|s| vk.multipart_verify(msg, &s).is_ok())
         }
+        CoseKey::Ed25519(vk) => ed25519_dalek::Signature::from_slice(sig)
+            .is_ok_and(|s| vk.multipart_verify(msg, &s).is_ok()),
         CoseKey::Rs256(vk) => {
-            use rsa::signature::Verifier as _;
-            rsa::pkcs1v15::Signature::try_from(sig).is_ok_and(|s| vk.verify(msg, &s).is_ok())
+            use rsa::signature::DigestVerifier as _;
+            use sha2::Digest as _;
+            let feed = |d: &mut sha2::Sha256| {
+                msg.iter().for_each(|part| d.update(part));
+                Ok(())
+            };
+            rsa::pkcs1v15::Signature::try_from(sig)
+                .is_ok_and(|s| vk.verify_digest(feed, &s).is_ok())
         }
         #[cfg(feature = "pqc")]
-        CoseKey::MlDsa(vk) => vk.verify(msg, b"", sig),
+        CoseKey::MlDsa(vk) => vk.verify(msg, sig),
     };
     if ok { Ok(()) } else { Err(Error::BadSignature) }
 }
@@ -79,10 +88,28 @@ impl MlDsaKey {
         }
     }
 
-    /// Verifies a pure ML-DSA signature with context string `ctx`. COSE
-    /// (RFC 9964) fixes the context to the empty string; the test vectors
-    /// use others.
-    pub(crate) fn verify(&self, msg: &[u8], ctx: &[u8], sig: &[u8]) -> bool {
+    /// Verifies a pure ML-DSA signature with the empty context string,
+    /// which COSE (RFC 9964) requires.
+    pub(crate) fn verify(&self, msg: &[&[u8]], sig: &[u8]) -> bool {
+        fn check<P: ml_dsa::MlDsaParams>(
+            vk: &ml_dsa::VerifyingKey<P>,
+            msg: &[&[u8]],
+            sig: &[u8],
+        ) -> bool {
+            ml_dsa::Signature::<P>::try_from(sig)
+                .is_ok_and(|s| vk.multipart_verify(msg, &s).is_ok())
+        }
+        match self {
+            Self::MlDsa44(vk) => check(vk, msg, sig),
+            Self::MlDsa65(vk) => check(vk, msg, sig),
+            Self::MlDsa87(vk) => check(vk, msg, sig),
+        }
+    }
+
+    /// Verifies with context string `ctx`, for the test vectors that use
+    /// contexts other than the empty one.
+    #[cfg(test)]
+    fn verify_with_context(&self, msg: &[u8], ctx: &[u8], sig: &[u8]) -> bool {
         fn check<P: ml_dsa::MlDsaParams>(
             vk: &ml_dsa::VerifyingKey<P>,
             msg: &[u8],
@@ -113,12 +140,12 @@ mod tests {
         let sk = ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]);
         let key = CoseKey::Ed25519(sk.verifying_key());
         let sig = sk.sign(MSG).to_bytes();
-        verify(&key, MSG, &sig).expect("good sig must verify");
+        verify(&key, &[MSG], &sig).expect("good sig must verify");
 
         let mut bad = sig;
         bad[0] ^= 0x01;
-        assert!(verify(&key, MSG, &bad).is_err());
-        assert!(verify(&key, MSG, &sig[..63]).is_err(), "short signature");
+        assert!(verify(&key, &[MSG], &bad).is_err());
+        assert!(verify(&key, &[MSG], &sig[..63]).is_err(), "short signature");
     }
 
     #[test]
@@ -128,14 +155,14 @@ mod tests {
         let key = CoseKey::Es256(*sk.verifying_key());
         let sig: EsSig = sk.sign(MSG);
         let der = sig.to_der().to_bytes().to_vec();
-        verify(&key, MSG, &der).expect("good sig must verify");
+        verify(&key, &[MSG], &der).expect("good sig must verify");
 
-        let mut bad = der.clone();
+        let mut bad = der;
         let n = bad.len();
         bad[n - 1] ^= 0x01;
-        assert!(verify(&key, MSG, &bad).is_err());
+        assert!(verify(&key, &[MSG], &bad).is_err());
         assert!(
-            verify(&key, MSG, &sig.to_bytes()).is_err(),
+            verify(&key, &[MSG], &sig.to_bytes()).is_err(),
             "raw r||s is not DER"
         );
     }
@@ -156,7 +183,7 @@ mod tests {
             for case in group["tests"].as_array().unwrap() {
                 let msg = hex::decode(case["msg"].as_str().unwrap()).unwrap();
                 let sig = hex::decode(case["sig"].as_str().unwrap()).unwrap();
-                let verified = verify(&key, &msg, &sig).is_ok();
+                let verified = verify(&key, &[&msg], &sig).is_ok();
                 match case["result"].as_str().unwrap() {
                     "valid" => assert!(verified, "tcId {} must verify", case["tcId"]),
                     "invalid" => assert!(!verified, "tcId {} must not verify", case["tcId"]),
@@ -187,7 +214,8 @@ mod tests {
                 other => panic!("unknown parameter set {other}"),
             };
             let key = MlDsaKey::from_cose(alg, &field("pk")).unwrap();
-            let verified = key.verify(&field("message"), &field("context"), &field("signature"));
+            let verified =
+                key.verify_with_context(&field("message"), &field("context"), &field("signature"));
             assert_eq!(
                 verified,
                 case["testPassed"].as_bool().unwrap(),
@@ -196,7 +224,11 @@ mod tests {
             );
             // The COSE path always uses the empty context.
             if case["context"].as_str().unwrap().is_empty() {
-                let result = verify(&CoseKey::MlDsa(key), &field("message"), &field("signature"));
+                let result = verify(
+                    &CoseKey::MlDsa(key),
+                    &[&field("message")],
+                    &field("signature"),
+                );
                 assert_eq!(result.is_ok(), verified, "tcId {} via verify", case["tcId"]);
             }
         }

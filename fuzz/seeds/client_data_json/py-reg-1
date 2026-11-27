@@ -1,0 +1,1 @@
+{"type":"webauthn.create","challenge":"rQM3_HtwB63gl8EoLqrM4iPCmQ3siW9U7Rutnw9qGMZT8lWAETIaZcFEw6j2Qw40fDGZW4QrbisBjoRbeXidLw","origin":"https://webauthn.io","crossOrigin":false,"other_keys_can_be_added_here":"do not compare clientDataJSON against a template. See https://goo.gl/yabPex"}
