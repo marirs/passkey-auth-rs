@@ -1,8 +1,8 @@
 [package]
 name        = "passkey-auth"
-version     = "0.1.3"
+version     = "0.2.0"
 edition     = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 license     = "MIT OR Apache-2.0"
 description = "Pure-Rust WebAuthn server library focused on passkeys (no openssl)."
 repository  = "https://github.com/marirs/passkey-auth-rs"
@@ -10,6 +10,10 @@ readme      = "README.md"
 keywords    = ["webauthn", "passkey", "fido2", "authentication"]
 categories  = ["authentication", "cryptography"]
 authors     = ["Sriram <marirs@gmail.com>"]
+exclude     = ["fuzz/", ".github/"]
+
+[package.metadata.docs.rs]
+features = ["pqc"]
 
 [lib]
 name = "passkey_auth"

@@ -8,6 +8,7 @@
 use thiserror::Error;
 
 #[derive(Error, Debug)]
+/// Why a registration or authentication ceremony failed.
 pub enum Error {
     /// Invalid base64url encoding on a wire field (challenge, credential
     /// id, signature, etc.).
@@ -23,7 +24,9 @@ pub enum Error {
     /// (expected `webauthn.create` / `webauthn.get`).
     #[error("clientDataJSON.type mismatch: expected {expected}, got {actual}")]
     ClientDataType {
+        /// The type this ceremony expects.
         expected: &'static str,
+        /// The type the client sent.
         actual: String,
     },
 
@@ -34,7 +37,12 @@ pub enum Error {
 
     /// `clientDataJSON.origin` was not exactly the configured RP origin.
     #[error("origin mismatch: expected {expected}, got {actual}")]
-    OriginMismatch { expected: String, actual: String },
+    OriginMismatch {
+        /// The configured origin.
+        expected: String,
+        /// The origin the client sent.
+        actual: String,
+    },
 
     /// `authenticatorData.rpIdHash` did not match SHA-256(RP_ID).
     #[error("rpIdHash mismatch")]
@@ -70,14 +78,24 @@ pub enum Error {
     /// when the spec requires it. Caller should treat this as a cloned
     /// credential and reject.
     #[error("counter went backwards (stored={stored}, new={new}): possible cloned credential")]
-    CounterReplay { stored: u32, new: u32 },
+    CounterReplay {
+        /// Counter stored with the credential.
+        stored: u32,
+        /// Counter in this assertion.
+        new: u32,
+    },
 
     /// The ceremony state handed to `finish_*` is older than the
     /// allowed ceiling (default 5 minutes). Indicates the caller did
     /// not TTL their session store, or the response came back after
     /// the user walked away. Reject and restart the ceremony.
     #[error("ceremony state expired ({age_secs} seconds old, max {max_secs})")]
-    CeremonyExpired { age_secs: u64, max_secs: u64 },
+    CeremonyExpired {
+        /// Age of the ceremony state.
+        age_secs: u64,
+        /// Oldest state accepted.
+        max_secs: u64,
+    },
 
     /// The `userHandle` carried in the assertion response did not
     /// match the user handle recorded at `start_authentication_for_user`
@@ -95,4 +113,5 @@ pub enum Error {
     Internal(&'static str),
 }
 
+/// Result with this crate's [`enum@Error`].
 pub type Result<T> = std::result::Result<T, Error>;

@@ -299,6 +299,7 @@ impl Webauthn {
         self
     }
 
+    /// The relying party ID this instance verifies `rpIdHash` against.
     pub fn rp_id(&self) -> &str {
         self.rp_id.as_str()
     }

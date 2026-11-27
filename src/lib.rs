@@ -1,6 +1,12 @@
 //! Pure-Rust WebAuthn server library, narrowed to the passkey
 //! ceremony. See `README.md` for scope and motivation.
 //!
+//! Credentials can use ES256, EdDSA and RS256, and with the `pqc`
+//! feature ML-DSA-44, ML-DSA-65 and ML-DSA-87
+//! (`Webauthn::allow_ml_dsa`). Attestation formats `none`, `packed` and
+//! `fido-u2f` are verified; certificate chains are not validated against
+//! a root.
+//!
 //! Quickstart:
 //! ```no_run
 //! use passkey_auth::Webauthn;
@@ -30,6 +36,7 @@
 
 #![forbid(unsafe_code)]
 #![deny(rust_2018_idioms)]
+#![warn(missing_docs)]
 
 mod attestation;
 mod auth_data;
