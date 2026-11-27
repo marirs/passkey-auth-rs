@@ -579,45 +579,85 @@ fn packed_x5c_alg_must_match_certificate_key() {
     let wa = webauthn();
     let es = Key::new(Alg::Es256, 42);
     let rs = rsa_key(RSA_2048);
-    let es_cert = certificate(&es, PACKED_SUBJECT, Vec::new());
-    let rs_cert = certificate(&rs, PACKED_SUBJECT, Vec::new());
-    assert!(x5c_registration(&wa, &es, -257, vec![es_cert], [0; 16]).is_err());
-    assert!(x5c_registration(&wa, &rs, -7, vec![rs_cert], [0; 16]).is_err());
+    let es_cert = certificate(&es, PACKED_SUBJECT, vec![basic_constraints(false)]);
+    let rs_cert = certificate(&rs, PACKED_SUBJECT, vec![basic_constraints(false)]);
+    for (key, alg, cert) in [(&es, -257, es_cert), (&rs, -7, rs_cert)] {
+        let err = x5c_registration(&wa, key, alg, vec![cert], [0; 16]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("does not match the certificate key"),
+            "{err}"
+        );
+    }
 }
 
 #[test]
 fn packed_x5c_certificate_requirements() {
     let wa = webauthn();
     let key = Key::new(Alg::Es256, 43);
+    let ok = || vec![basic_constraints(false)];
     let cases = [
-        ("CN=x,O=passkey-auth,C=US", Vec::new(), "no OU"),
-        (
-            "CN=x,OU=Some Other Unit,O=passkey-auth,C=US",
-            Vec::new(),
-            "wrong OU",
-        ),
-        ("CN=x,OU=Authenticator Attestation,C=US", Vec::new(), "no O"),
+        ("CN=x,O=passkey-auth,C=US", ok(), "OU"),
+        ("CN=x,OU=Some Other Unit,O=passkey-auth,C=US", ok(), "OU"),
+        ("CN=x,OU=Authenticator Attestation,C=US", ok(), "C or O"),
         (
             "OU=Authenticator Attestation,O=passkey-auth,C=US",
-            Vec::new(),
-            "no CN",
+            ok(),
+            "CN",
         ),
+        (
+            PACKED_SUBJECT,
+            vec![aaguid_extension(AAGUID, false)],
+            "Basic Constraints",
+        ),
+        (PACKED_SUBJECT, Vec::new(), "version 3"),
         (
             PACKED_SUBJECT,
             vec![basic_constraints(true)],
-            "CA certificate",
+            "Basic Constraints",
         ),
         (
             PACKED_SUBJECT,
-            vec![aaguid_extension(AAGUID, true)],
-            "critical AAGUID extension",
+            vec![basic_constraints(false), aaguid_extension(AAGUID, true)],
+            "critical",
         ),
     ];
-    for (subject, extensions, case) in cases {
+    for (subject, extensions, expected) in cases {
         let cert = certificate(&key, subject, extensions);
         let err = x5c_registration(&wa, &key, -7, vec![cert], AAGUID).unwrap_err();
-        assert!(matches!(err, Error::Cbor(_)), "{case}: {err:?}");
+        assert!(err.to_string().contains(expected), "{subject}: {err}");
     }
+}
+
+#[test]
+fn attestation_statement_shape() {
+    let wa = webauthn();
+    let authenticator = Authenticator::new(Alg::Es256, 47);
+    let (challenge, state) = wa.start_registration(b"u", "u", "U", &[]);
+    let client_data = client_data_json("webauthn.create", &challenge.challenge, ORIGIN);
+    let auth_data = authenticator.registration_auth_data();
+    let run = |object: Vec<u8>| {
+        wa.finish_registration(
+            &state,
+            &registration_response(&authenticator.credential_id, object, &client_data),
+        )
+    };
+    let none_with = |stmt: Cbor| attestation_object("none", stmt, auth_data.clone());
+    run(none_with(Cbor::Map(Vec::new()))).unwrap();
+    assert!(
+        run(none_with(Cbor::Map(vec![(
+            text("sig"),
+            Cbor::Bytes(vec![1])
+        )])))
+        .is_err()
+    );
+    assert!(run(none_with(Cbor::Array(Vec::new()))).is_err());
+    let no_statement = cbor(&Cbor::Map(vec![
+        (text("fmt"), text("none")),
+        (text("authData"), Cbor::Bytes(auth_data.clone())),
+    ]));
+    let err = run(no_statement).unwrap_err();
+    assert!(err.to_string().contains("missing attStmt"), "{err}");
 }
 
 #[test]

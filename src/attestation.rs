@@ -53,8 +53,7 @@ pub(crate) struct ParsedAttestation<'a> {
     pub auth_data_raw: &'a [u8],
     pub auth_data: AuthenticatorData<'a>,
     pub fmt: &'a str,
-    /// `None` when the object has no `attStmt` (valid for `none` only).
-    pub att_stmt: Option<Value<'a>>,
+    pub att_stmt: Value<'a>,
 }
 
 impl<'a> ParsedAttestation<'a> {
@@ -83,6 +82,8 @@ impl<'a> ParsedAttestation<'a> {
             .ok_or_else(|| Error::Cbor("attestationObject: missing fmt".into()))?
             .as_text()
             .ok_or_else(|| Error::Cbor("attestationObject.fmt not text".into()))?;
+        let att_stmt =
+            att_stmt.ok_or_else(|| Error::Cbor("attestationObject: missing attStmt".into()))?;
         let auth_data_raw = auth_data
             .ok_or_else(|| Error::Cbor("attestationObject: missing authData".into()))?
             .as_bytes()
@@ -109,7 +110,11 @@ impl<'a> ParsedAttestation<'a> {
         client_data_hash: &[u8; 32],
     ) -> Result<()> {
         match self.fmt {
-            "none" => Ok(()),
+            // WebAuthn-3 §8.7: the `none` statement is an empty map.
+            "none" => match self.att_stmt.as_map().map(|mut entries| entries.next()) {
+                Some(None) => Ok(()),
+                _ => Err(Error::Cbor("none: attStmt is not an empty map".into())),
+            },
             "packed" => verify_packed(self, credential_key, client_data_hash),
             "fido-u2f" => verify_fido_u2f(self, credential_key, client_data_hash),
             other => Err(Error::Cbor(format!("unsupported attestation fmt: {other}"))),
@@ -118,7 +123,7 @@ impl<'a> ParsedAttestation<'a> {
 }
 
 /// The `attStmt` fields `packed` and `fido-u2f` read. A field of the wrong
-/// type counts as missing, as before; a repeated field is refused.
+/// type counts as missing; a repeated field is refused.
 struct Statement<'a> {
     alg: Option<i64>,
     sig: Option<&'a [u8]>,
@@ -127,14 +132,8 @@ struct Statement<'a> {
 }
 
 fn parse_statement<'a>(att: &ParsedAttestation<'a>, fmt: &str) -> Result<Statement<'a>> {
-    let Some(stmt) = att.att_stmt else {
-        return Ok(Statement {
-            alg: None,
-            sig: None,
-            x5c: None,
-        });
-    };
-    let map = stmt
+    let map = att
+        .att_stmt
         .as_map()
         .ok_or_else(|| Error::Cbor(format!("{fmt}: attStmt not a map")))?;
     let (mut alg, mut sig, mut x5c) = (None, None, None);

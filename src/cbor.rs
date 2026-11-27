@@ -173,7 +173,13 @@ impl<'a> Decoder<'a> {
         if info == 31 {
             return match major {
                 4 => self.indefinite(depth).map(Value::Array),
-                5 => self.indefinite(depth).map(Value::Map),
+                5 => {
+                    let seq = self.indefinite(depth)?;
+                    if seq.items % 2 != 0 {
+                        return Err(Error::Cbor("CBOR map has a key without a value".into()));
+                    }
+                    Ok(Value::Map(seq))
+                }
                 2 | 3 => Err(Error::Cbor("indefinite-length CBOR string".into())),
                 _ => Err(Error::Cbor("malformed CBOR head".into())),
             };
@@ -391,6 +397,10 @@ mod tests {
             (&[0xbb, 0x80, 0, 0, 0, 0, 0, 0, 0], "map count overflow"),
             (&[0x62, 0xff, 0xfe], "text not UTF-8"),
             (&[0x9f, 0x01], "unterminated indefinite array"),
+            (
+                &[0xbf, 0x01, 0x02, 0x03, 0xff],
+                "indefinite map with a dangling key",
+            ),
             (&[0x01, 0x02], "trailing byte"),
         ] {
             assert!(decode_exact(data).is_err(), "{case}");

@@ -74,11 +74,14 @@ Defects found in a review against WebAuthn Level 3:
   keys. CBOR integers outside the i64 range no longer truncate (an
   unsigned 2^64 - 7 read as alg -7).
 - `packed` with `x5c` checks the §8.2.1 certificate requirements
-  (version 3, subject C, O and CN, OU "Authenticator Attestation",
-  Basic Constraints CA false, non-critical AAGUID extension) and that
-  `alg` matches the certificate key.
+  (version 3, subject C, O and CN, OU "Authenticator Attestation", a
+  Basic Constraints extension with CA false, non-critical AAGUID
+  extension) and that `alg` matches the certificate key.
+- An attestationObject must carry `attStmt`, and the `none` format's
+  statement must be an empty map (§6.5, §8.7).
 - `fido-u2f` requires exactly one certificate in `x5c` (§8.6).
 - A leading UTF-8 byte order mark in clientDataJSON is stripped before
   parsing (§7.1 step 6).
 - CBOR byte and text strings of indefinite length are refused; CTAP2
   canonical CBOR never produces them.
+- An indefinite-length CBOR map with a key and no value is refused.

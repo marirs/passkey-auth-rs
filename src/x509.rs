@@ -9,7 +9,8 @@
 //!    present. WebAuthn-3 §8.2 requires it to match `authData`'s AAGUID.
 //! 3. **The `packed` certificate requirements** of WebAuthn-3 §8.2.1:
 //!    version 3; a subject with C, O, CN and OU set to
-//!    "Authenticator Attestation"; Basic Constraints with CA false; and a
+//!    "Authenticator Attestation"; a Basic Constraints extension with CA
+//!    false; and a
 //!    non-critical AAGUID extension.
 //!
 //! This module does not validate the chain against a root store (no FIDO
@@ -123,11 +124,11 @@ impl AttestationCert {
             Some("subject lacks CN")
         } else if !ou_ok {
             Some("subject OU is not \"Authenticator Attestation\"")
-        } else if matches!(
+        } else if !matches!(
             basic_constraints,
-            Some(Err(_)) | Some(Ok(BasicConstraints { ca: true, .. }))
+            Some(Ok(BasicConstraints { ca: false, .. }))
         ) {
-            Some("Basic Constraints CA is not false")
+            Some("Basic Constraints missing or CA is not false")
         } else if aaguid_ext.is_some_and(|ext| ext.critical) {
             Some("AAGUID extension is marked critical")
         } else {

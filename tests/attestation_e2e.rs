@@ -152,6 +152,12 @@ impl CertBundle {
         // FidoAaguid handles the double OCTET STRING wrapping the spec
         // requires (outer wrap done by AsExtension::to_extension, inner
         // wrap done by our Encode impl).
+        builder
+            .add_extension(&x509_cert::ext::pkix::BasicConstraints {
+                ca: false,
+                path_len_constraint: None,
+            })
+            .expect("add basic constraints");
         match aaguid {
             AaguidExt::None => {}
             AaguidExt::Valid(value) => {
