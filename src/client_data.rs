@@ -59,7 +59,26 @@ pub(crate) fn validate(
         b64url_decode
     };
     let raw = decode(encoded)?;
-    let p: Parsed = serde_json::from_slice(&raw).map_err(|e| Error::ClientData(e.to_string()))?;
+    check(
+        &raw,
+        expected_type,
+        expected_challenge,
+        expected_origin,
+        decode,
+    )?;
+    Ok(raw)
+}
+
+/// Runs the `clientDataJSON` checks on the decoded JSON bytes. `decode`
+/// is the base64 decoder for the inner `challenge` field.
+pub(crate) fn check(
+    raw: &[u8],
+    expected_type: &str,
+    expected_challenge: &Challenge,
+    expected_origin: &str,
+    decode: fn(&str) -> Result<Vec<u8>>,
+) -> Result<()> {
+    let p: Parsed = serde_json::from_slice(raw).map_err(|e| Error::ClientData(e.to_string()))?;
 
     if p.kind != expected_type {
         return Err(Error::ClientDataType {
@@ -84,7 +103,7 @@ pub(crate) fn validate(
         });
     }
 
-    Ok(raw)
+    Ok(())
 }
 
 #[cfg(test)]

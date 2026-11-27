@@ -45,6 +45,12 @@ url           = "2"
 x509-cert     = { version = "0.3", features = ["std"] }
 const-oid     = "0.10"
 
+[features]
+default = []
+# Exposes the parsers to the fuzz targets in fuzz/ and the parser
+# benchmarks in benches/. Not part of the public API; no semver promise.
+__internals = []
+
 [dev-dependencies]
 # Known-vector regression tests live under tests/.
 hex           = "0.4"
@@ -79,6 +85,18 @@ x509-cert     = { version = "0.3", features = ["builder", "std"] }
 # the SQLite amalgamation so the example builds on machines that do
 # not have sqlite installed system-wide (notably Windows CI).
 rusqlite      = { version = "0.43", features = ["bundled"] }
+
+# Benchmarks under benches/.
+criterion     = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name    = "verify"
+harness = false
+
+[[bench]]
+name              = "parsers"
+harness           = false
+required-features = ["__internals"]
 
 [[example]]
 name = "axum_server"

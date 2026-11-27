@@ -38,6 +38,9 @@ mod client_data;
 mod cose;
 mod crypto;
 pub mod error;
+#[cfg(feature = "__internals")]
+#[doc(hidden)]
+pub mod internals;
 mod types;
 mod x509;
 
