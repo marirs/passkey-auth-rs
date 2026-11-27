@@ -222,12 +222,11 @@ fn verify_packed(
             // match the AAGUID inside authData (spec WebAuthn-3 §8.2).
             if let (Some(cert_aaguid), Some(attested)) =
                 (leaf.aaguid, att.auth_data.attested.as_ref())
+                && &cert_aaguid != attested.aaguid
             {
-                if &cert_aaguid != attested.aaguid {
-                    return Err(Error::Cbor(
-                        "packed (x5c): cert AAGUID does not match authData".into(),
-                    ));
-                }
+                return Err(Error::Cbor(
+                    "packed (x5c): cert AAGUID does not match authData".into(),
+                ));
             }
 
             crypto::verify(&leaf.key, &msg, sig)
