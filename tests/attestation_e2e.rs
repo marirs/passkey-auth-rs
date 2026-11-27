@@ -133,7 +133,10 @@ impl CertBundle {
         let spki =
             SubjectPublicKeyInfoOwned::try_from(pk_der.as_slice()).expect("SPKI from p256 DER");
 
-        let subject = Name::from_str("CN=passkey-auth test attestation").expect("name parse");
+        let subject = Name::from_str(
+            "CN=passkey-auth test attestation,OU=Authenticator Attestation,O=passkey-auth,C=US",
+        )
+        .expect("name parse");
 
         // Self-issued leaf with no profile extensions. We are a leaf cert
         // in a one-cert chain; that's all the FIDO format needs.

@@ -56,7 +56,9 @@ pub enum Error {
     #[error("CBOR decode failed: {0}")]
     Cbor(String),
 
-    /// COSE key used an algorithm we don't support (only ES256 / EdDSA).
+    /// COSE key used an algorithm this build does not accept: ES256,
+    /// EdDSA and RS256 always, ML-DSA-44/65/87 with the `pqc` feature (and,
+    /// at registration, only when the relying party enabled ML-DSA).
     #[error("unsupported COSE algorithm: {0}")]
     UnsupportedAlg(i64),
 

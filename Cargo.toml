@@ -45,8 +45,17 @@ url           = "2"
 x509-cert     = { version = "0.3", features = ["std"] }
 const-oid     = "0.10"
 
+# RS256 (RSASSA-PKCS1-v1_5 with SHA-256) for credentials and packed
+# attestation certificates. Public-key operations only.
+rsa           = { version = "0.10", default-features = false, features = ["std", "encoding", "pkcs1v15"] }
+
+# ML-DSA (FIPS 204) verification behind the `pqc` feature.
+ml-dsa        = { version = "0.1.2", default-features = false, features = ["alloc"], optional = true }
+
 [features]
 default = []
+# ML-DSA-44/65/87 credentials (COSE algorithms -48/-49/-50, RFC 9964).
+pqc     = ["dep:ml-dsa"]
 # Exposes the parsers to the fuzz targets in fuzz/ and the parser
 # benchmarks in benches/. Not part of the public API; no semver promise.
 __internals = []
@@ -85,6 +94,11 @@ x509-cert     = { version = "0.3", features = ["builder", "std"] }
 # the SQLite amalgamation so the example builds on machines that do
 # not have sqlite installed system-wide (notably Windows CI).
 rusqlite      = { version = "0.43", features = ["bundled"] }
+
+# RS256 and ML-DSA signing for the synthetic authenticator in
+# tests/support (test keys only).
+rsa           = { version = "0.10", default-features = false, features = ["std", "encoding", "pkcs1v15"] }
+ml-dsa        = { version = "0.1.2", default-features = false, features = ["alloc"] }
 
 # Benchmarks under benches/.
 criterion     = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }

@@ -1,103 +1,140 @@
 //! Minimal X.509 inspection for attestation certificates.
 //!
-//! Two narrow needs from the WebAuthn `packed` and `fido-u2f`
-//! attestation formats:
+//! The `packed` and `fido-u2f` attestation formats need three things from
+//! the leaf certificate in `x5c`:
 //!
-//! 1. **Extract the SubjectPublicKey** so we can verify the attestation
-//!    `sig` field with the cert's key (not the credential's key like
-//!    self-attestation uses).
+//! 1. **The subject public key**, to verify the attestation `sig`. P-256
+//!    ECDSA keys (ES256) and 2048-4096 bit RSA keys (RS256) are read.
+//! 2. **The FIDO AAGUID extension** (OID `1.3.6.1.4.1.45724.1.1.4`) when
+//!    present. WebAuthn-3 §8.2 requires it to match `authData`'s AAGUID.
+//! 3. **The `packed` certificate requirements** of WebAuthn-3 §8.2.1:
+//!    version 3; a subject with C, O, CN and OU set to
+//!    "Authenticator Attestation"; Basic Constraints with CA false; and a
+//!    non-critical AAGUID extension.
 //!
-//! 2. **Extract the FIDO AAGUID extension** (OID `1.3.6.1.4.1.45724.1.1.4`)
-//!    when present. Lets a caller correlate the AAGUID embedded in
-//!    `authData` with what the cert claims. Per the spec the two MUST
-//!    match if the extension is present.
-//!
-//! What this module deliberately does NOT do:
-//!
-//! - Cert chain validation against a root store (no FIDO MDS).
-//! - Cert expiry / notBefore checks (attestation certs typically have
-//!   very long validity and rotate authenticator-by-authenticator).
-//! - Algorithm-policy enforcement beyond ES256 - we reject anything
-//!   that is not P-256 ECDSA, which is what every passkey-class
-//!   hardware key uses today.
+//! This module does not validate the chain against a root store (no FIDO
+//! MDS) and does not check expiry: attestation certificates have long
+//! validity and rotate per authenticator batch.
 
 use const_oid::ObjectIdentifier;
+use const_oid::db::rfc5280::ID_CE_BASIC_CONSTRAINTS;
+use const_oid::db::rfc5912::{ID_EC_PUBLIC_KEY, RSA_ENCRYPTION, SECP_256_R_1};
 use x509_cert::Certificate;
+use x509_cert::certificate::Version;
 use x509_cert::der::Decode;
-use x509_cert::der::oid::db::rfc5912::ID_EC_PUBLIC_KEY;
+use x509_cert::ext::pkix::BasicConstraints;
 
+use crate::cose::{self, CoseKey};
 use crate::error::{Error, Result};
 
-/// FIDO Alliance AAGUID extension OID. Per FIDO U2F authenticator
-/// transports extension spec, surfaces the AAGUID as an OCTET STRING
-/// inside an OCTET STRING (yes, double-wrapped).
+/// FIDO Alliance AAGUID extension OID. The extension value is an OCTET
+/// STRING wrapping another OCTET STRING of 16 bytes.
 const OID_FIDO_AAGUID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.4.1.45724.1.1.4");
 
-/// What we pull out of an attestation cert.
+/// The OU WebAuthn-3 §8.2.1 requires in a `packed` attestation certificate.
+const PACKED_SUBJECT_OU: &str = "Authenticator Attestation";
+
+/// What the attestation formats read from a leaf certificate.
 #[derive(Debug)]
 pub(crate) struct AttestationCert {
-    /// Uncompressed SEC1 P-256 point: 0x04 || X(32) || Y(32) = 65 bytes.
-    /// Only ES256 / P-256 ECDSA certs are supported.
-    pub p256_pubkey_sec1: [u8; 65],
-    /// AAGUID from the cert extension, if present. Per WebAuthn-3 the
-    /// presence of this extension is OPTIONAL, but when present the
-    /// authenticator MUST set it to its actual AAGUID and the verifier
-    /// MUST check it matches `authData.attestedCredentialData.aaguid`.
+    /// Subject public key: [`CoseKey::Es256`] or [`CoseKey::Rs256`].
+    pub key: CoseKey,
+    /// AAGUID from the certificate extension, if present.
     pub aaguid: Option<[u8; 16]>,
+    /// The first WebAuthn-3 §8.2.1 requirement the certificate breaks, if
+    /// any. Only the `packed` format applies these requirements.
+    pub packed_violation: Option<&'static str>,
 }
 
 impl AttestationCert {
-    /// Parse a single DER-encoded cert (the first element of the
-    /// `x5c` array). Strict: rejects non-P-256, missing pubkey, etc.
+    /// Parses one DER certificate (an `x5c` element). Refuses keys other
+    /// than P-256 ECDSA and 2048-4096 bit RSA, and a malformed AAGUID
+    /// extension.
     pub(crate) fn from_der(der: &[u8]) -> Result<Self> {
         let cert =
             Certificate::from_der(der).map_err(|e| Error::Cbor(format!("x509 parse: {e}")))?;
-
-        // ---- public key ----------------------------------------------
-        let spki = cert.tbs_certificate().subject_public_key_info();
-        // Algorithm must be id-ecPublicKey with an algorithm parameter
-        // selecting P-256. We only support ES256 in this crate.
-        if spki.algorithm.oid != ID_EC_PUBLIC_KEY {
-            return Err(Error::Cbor(format!(
-                "attestation cert: non-EC public key (alg OID {})",
-                spki.algorithm.oid,
-            )));
-        }
-        // SubjectPublicKey is the SEC1-encoded uncompressed point.
-        let pk_bits = spki.subject_public_key.as_bytes().ok_or_else(|| {
+        let tbs = cert.tbs_certificate();
+        let spki = tbs.subject_public_key_info();
+        let key_bits = spki.subject_public_key.as_bytes().ok_or_else(|| {
             Error::Cbor("attestation cert: pubkey bit-string has unused bits".into())
         })?;
-        if pk_bits.len() != 65 || pk_bits[0] != 0x04 {
-            return Err(Error::Cbor(format!(
-                "attestation cert: pubkey not SEC1-uncompressed P-256 ({} bytes, prefix 0x{:02x})",
-                pk_bits.len(),
-                pk_bits.first().copied().unwrap_or(0),
-            )));
-        }
-        let mut p256_pubkey_sec1 = [0u8; 65];
-        p256_pubkey_sec1.copy_from_slice(pk_bits);
 
-        // ---- AAGUID extension (optional) ----------------------------
-        //
-        // Presence of the extension is optional per WebAuthn-3. BUT
-        // when present it MUST parse correctly - we do NOT silently
-        // treat a malformed AAGUID extension as "absent" because that
-        // would let a malicious cert bypass the
-        //   leaf_aaguid == authData_aaguid
-        // check in verify_packed by intentionally garbling the inner
-        // OCTET STRING.
-        let aaguid_ext = cert
-            .tbs_certificate()
-            .extensions()
-            .and_then(|exts| exts.iter().find(|e| e.extn_id == OID_FIDO_AAGUID));
-        let aaguid = match aaguid_ext {
-            Some(ext) => Some(parse_aaguid_octet_string(ext.extn_value.as_bytes())?),
-            None => None,
+        let key = match spki.algorithm.oid {
+            ID_EC_PUBLIC_KEY => {
+                let curve = spki
+                    .algorithm
+                    .parameters
+                    .as_ref()
+                    .and_then(|p| p.decode_as().ok());
+                if curve != Some(SECP_256_R_1) {
+                    return Err(Error::Cbor("attestation cert: EC key is not P-256".into()));
+                }
+                if key_bits.len() != 65 || key_bits[0] != 0x04 {
+                    return Err(Error::Cbor(
+                        "attestation cert: pubkey not SEC1-uncompressed P-256".into(),
+                    ));
+                }
+                p256::ecdsa::VerifyingKey::from_sec1_bytes(key_bits)
+                    .map(CoseKey::Es256)
+                    .map_err(|_| {
+                        Error::Cbor("attestation cert: P-256 point not on the curve".into())
+                    })?
+            }
+            RSA_ENCRYPTION => {
+                let rsa = rsa::pkcs1::RsaPublicKey::<rsa::pkcs1::UintRef<'_>>::from_der(key_bits)
+                    .map_err(|_| {
+                    Error::Cbor("attestation cert: malformed RSA public key".into())
+                })?;
+                let key = cose::rsa_key(rsa.modulus.as_bytes(), rsa.public_exponent.as_bytes())?;
+                CoseKey::Rs256(Box::new(key))
+            }
+            other => {
+                return Err(Error::Cbor(format!(
+                    "attestation cert: unsupported public key (alg OID {other})"
+                )));
+            }
+        };
+
+        // Presence of the AAGUID extension is optional, but a malformed one
+        // is an error, not "absent": otherwise a garbled inner OCTET STRING
+        // would skip the cert-AAGUID == authData-AAGUID check.
+        let extensions = tbs.extensions().map(|e| e.as_slice()).unwrap_or_default();
+        let aaguid_ext = extensions.iter().find(|e| e.extn_id == OID_FIDO_AAGUID);
+        let aaguid = aaguid_ext
+            .map(|ext| parse_aaguid_octet_string(ext.extn_value.as_bytes()))
+            .transpose()?;
+
+        let basic_constraints = extensions
+            .iter()
+            .find(|e| e.extn_id == ID_CE_BASIC_CONSTRAINTS)
+            .map(|ext| BasicConstraints::from_der(ext.extn_value.as_bytes()));
+        let subject = tbs.subject();
+        let ou_ok =
+            matches!(subject.organization_unit(), Ok(Some(ou)) if ou.value() == PACKED_SUBJECT_OU);
+
+        let packed_violation = if tbs.version() != Version::V3 {
+            Some("certificate is not version 3")
+        } else if !has(subject.country()) || !has(subject.organization()) {
+            Some("subject lacks C or O")
+        } else if !has(subject.common_name()) {
+            Some("subject lacks CN")
+        } else if !ou_ok {
+            Some("subject OU is not \"Authenticator Attestation\"")
+        } else if matches!(
+            basic_constraints,
+            Some(Err(_)) | Some(Ok(BasicConstraints { ca: true, .. }))
+        ) {
+            Some("Basic Constraints CA is not false")
+        } else if aaguid_ext.is_some_and(|ext| ext.critical) {
+            Some("AAGUID extension is marked critical")
+        } else {
+            None
         };
 
         Ok(Self {
-            p256_pubkey_sec1,
+            key,
             aaguid,
+            packed_violation,
         })
     }
 }
@@ -106,12 +143,17 @@ impl AttestationCert {
 /// OCTET STRING of 16 bytes (per the FIDO spec). Strip the inner DER
 /// header by hand - it is always `0x04 0x10 <16 bytes>`.
 fn parse_aaguid_octet_string(value: &[u8]) -> Result<[u8; 16]> {
-    if value.len() != 18 || value[0] != 0x04 || value[1] != 0x10 {
-        return Err(Error::Cbor(
-            "attestation cert: malformed AAGUID extension".into(),
-        ));
+    match value {
+        [0x04, 0x10, aaguid @ ..] => aaguid.try_into().map_err(|_| malformed_aaguid()),
+        _ => Err(malformed_aaguid()),
     }
-    let mut aaguid = [0u8; 16];
-    aaguid.copy_from_slice(&value[2..18]);
-    Ok(aaguid)
+}
+
+/// `true` when a subject attribute is present and decodes.
+fn has<T>(value: x509_cert::der::Result<Option<T>>) -> bool {
+    matches!(value, Ok(Some(_)))
+}
+
+fn malformed_aaguid() -> Error {
+    Error::Cbor("attestation cert: malformed AAGUID extension".into())
 }

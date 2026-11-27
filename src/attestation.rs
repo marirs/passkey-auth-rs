@@ -21,9 +21,11 @@
 //!
 //! - **`packed` with `x5c`** (full cert chain) - `attStmt = { alg, sig, x5c }`.
 //!   The signature is over `authData || cdjHash` using the
-//!   public key of the **leaf cert** in `x5c`. We parse the leaf,
-//!   verify the signature, and (if the cert carries the FIDO AAGUID
-//!   extension) verify that AAGUID matches `authData`.
+//!   public key of the **leaf cert** in `x5c` (ES256 with a P-256
+//!   cert, RS256 with an RSA cert). We parse the leaf, check the
+//!   WebAuthn-3 §8.2.1 certificate requirements, verify the signature,
+//!   and (if the cert carries the FIDO AAGUID extension) verify that
+//!   AAGUID matches `authData`.
 //!   **We do NOT validate the cert chain to a trusted root.** Without
 //!   the FIDO Metadata Service we cannot tell whether the cert really
 //!   came from Yubico / Feitian / etc.; we only confirm internal
@@ -32,8 +34,8 @@
 //! - **`fido-u2f`** - legacy format from older Yubikeys.
 //!   `attStmt = { sig, x5c }`. Signature is over a specific
 //!   pre-image: `(0x00 || rpIdHash || cdjHash || credId || pubKey-SEC1)`
-//!   and verified against the leaf cert's public key. Same chain-
-//!   validation caveat as packed-x5c.
+//!   and verified against the public key of the single P-256 cert in
+//!   `x5c`. Same chain-validation caveat as packed-x5c.
 //!
 //! Other formats (`tpm`, `android-key`, `android-safetynet`, `apple`)
 //! are still rejected with a clear error.
@@ -153,7 +155,7 @@ fn parse_packed_att_stmt(att_stmt: &CborValue) -> Result<PackedAttStmt> {
         match key {
             "alg" => {
                 alg = match v {
-                    CborValue::Integer(i) => Some(i128::from(*i) as i64),
+                    CborValue::Integer(i) => i64::try_from(i128::from(*i)).ok(),
                     _ => None,
                 };
             }
@@ -216,19 +218,22 @@ fn verify_packed(
         }
         // ── Full chain: verify against the leaf cert's public key ───
         Some(chain) => {
-            // For now we only support ES256 attestation certs (every
-            // passkey-class hardware key uses P-256). Reject other alg
-            // values with a clear error rather than silently mis-verifying.
-            if stmt.alg != ALG_ES256 {
-                return Err(Error::Cbor(format!(
-                    "packed (x5c): only ES256 attestation supported, got alg {}",
-                    stmt.alg,
-                )));
-            }
             let leaf_der = chain
                 .first()
                 .ok_or_else(|| Error::Cbor("packed (x5c): empty cert chain".into()))?;
             let leaf = AttestationCert::from_der(leaf_der)?;
+            if let Some(violation) = leaf.packed_violation {
+                return Err(Error::Cbor(format!("packed (x5c): {violation}")));
+            }
+            // `alg` names the algorithm of the cert key: ES256 for a P-256
+            // cert, RS256 for an RSA cert. Anything else is refused rather
+            // than verified with the wrong algorithm.
+            if stmt.alg != leaf.key.alg() {
+                return Err(Error::Cbor(format!(
+                    "packed (x5c): alg {} does not match the certificate key",
+                    stmt.alg,
+                )));
+            }
 
             // If the cert carries the FIDO AAGUID extension, it MUST
             // match the AAGUID inside authData (spec WebAuthn-3 §8.2).
@@ -242,8 +247,7 @@ fn verify_packed(
                 }
             }
 
-            // Verify the signature with the cert's public key.
-            crypto::verify_es256_sec1(&leaf.p256_pubkey_sec1, &msg, &stmt.sig)
+            crypto::verify(&leaf.key, &msg, &stmt.sig)
         }
     }
 }
@@ -256,8 +260,8 @@ fn verify_fido_u2f(
     client_data_hash: &[u8; 32],
 ) -> Result<()> {
     // The credential key MUST be ES256 (U2F is P-256 only).
-    let (cred_x, cred_y) = match cred_key {
-        CoseKey::Es256 { x, y } => (x, y),
+    let cred_point = match cred_key {
+        CoseKey::Es256(vk) => vk.to_sec1_point(false),
         _ => {
             return Err(Error::Cbor(
                 "fido-u2f: credential key must be ES256 / P-256".into(),
@@ -308,10 +312,18 @@ fn verify_fido_u2f(
     }
     let sig = sig.ok_or_else(|| Error::Cbor("fido-u2f: missing sig".into()))?;
     let chain = x5c.ok_or_else(|| Error::Cbor("fido-u2f: missing x5c".into()))?;
-    let leaf_der = chain
-        .first()
-        .ok_or_else(|| Error::Cbor("fido-u2f: empty cert chain".into()))?;
+    // WebAuthn-3 §8.6: x5c holds exactly one certificate.
+    let [leaf_der] = chain.as_slice() else {
+        return Err(Error::Cbor(
+            "fido-u2f: x5c must hold exactly one certificate".into(),
+        ));
+    };
     let leaf = AttestationCert::from_der(leaf_der)?;
+    if leaf.key.alg() != ALG_ES256 {
+        return Err(Error::Cbor(
+            "fido-u2f: certificate key must be P-256".into(),
+        ));
+    }
 
     // U2F pre-image: 0x00 || rpIdHash || cdjHash || credId || pubKey-SEC1
     // where pubKey-SEC1 is 0x04 || X || Y (uncompressed).
@@ -326,9 +338,7 @@ fn verify_fido_u2f(
     pre_image.extend_from_slice(&att.auth_data.rp_id_hash);
     pre_image.extend_from_slice(client_data_hash);
     pre_image.extend_from_slice(cred_id);
-    pre_image.push(0x04);
-    pre_image.extend_from_slice(cred_x);
-    pre_image.extend_from_slice(cred_y);
+    pre_image.extend_from_slice(cred_point.as_bytes());
 
-    crypto::verify_es256_sec1(&leaf.p256_pubkey_sec1, &pre_image, &sig)
+    crypto::verify(&leaf.key, &pre_image, &sig)
 }

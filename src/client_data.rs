@@ -31,8 +31,13 @@ struct Parsed {
     challenge: String,
     origin: String,
     #[serde(rename = "crossOrigin", default)]
-    _cross_origin: bool,
+    cross_origin: bool,
+    #[serde(rename = "topOrigin")]
+    top_origin: Option<serde::de::IgnoredAny>,
 }
+
+/// UTF-8 byte order mark, which WebAuthn-3 §7.1 step 6 strips before parsing.
+const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
 
 /// Decode the base64url envelope, parse the JSON, then enforce the
 /// invariants: type matches, challenge matches what we issued,
@@ -78,7 +83,8 @@ pub(crate) fn check(
     expected_origin: &str,
     decode: fn(&str) -> Result<Vec<u8>>,
 ) -> Result<()> {
-    let p: Parsed = serde_json::from_slice(raw).map_err(|e| Error::ClientData(e.to_string()))?;
+    let json = raw.strip_prefix(UTF8_BOM).unwrap_or(raw);
+    let p: Parsed = serde_json::from_slice(json).map_err(|e| Error::ClientData(e.to_string()))?;
 
     if p.kind != expected_type {
         return Err(Error::ClientDataType {
@@ -101,6 +107,15 @@ pub(crate) fn check(
             expected: expected_origin.to_owned(),
             actual: p.origin,
         });
+    }
+
+    // WebAuthn-3 §7.1 step 10 and §7.2 step 14: a ceremony run inside a
+    // cross-origin iframe is accepted only by an RP that expects one. This
+    // crate serves top-level pages only.
+    if p.cross_origin || p.top_origin.is_some() {
+        return Err(Error::ClientData(
+            "ceremony ran in a cross-origin iframe (crossOrigin or topOrigin set)".into(),
+        ));
     }
 
     Ok(())
@@ -143,6 +158,43 @@ mod tests {
         let cdj = make_cdj("webauthn.create", &bad.to_b64url(), "https://example.com");
         let err = validate(&cdj, TYPE_REGISTER, &chal, "https://example.com", false).unwrap_err();
         assert!(matches!(err, Error::ChallengeMismatch));
+    }
+
+    fn raw(extra: &str) -> Vec<u8> {
+        let chal = Challenge(vec![1, 2, 3, 4]).to_b64url();
+        format!(r#"{{"type":"webauthn.get","challenge":"{chal}","origin":"https://example.com"{extra}}}"#)
+            .into_bytes()
+    }
+
+    fn run(raw: &[u8]) -> Result<()> {
+        let chal = Challenge(vec![1, 2, 3, 4]);
+        check(
+            raw,
+            TYPE_AUTHENTICATE,
+            &chal,
+            "https://example.com",
+            b64url_decode,
+        )
+    }
+
+    #[test]
+    fn cross_origin_and_top_origin_rejected() {
+        assert!(run(&raw("")).is_ok());
+        assert!(run(&raw(r#","crossOrigin":false"#)).is_ok());
+        assert!(run(&raw(r#","crossOrigin":true"#)).is_err());
+        assert!(run(&raw(r#","topOrigin":"https://evil.example""#)).is_err());
+    }
+
+    #[test]
+    fn leading_bom_is_stripped() {
+        let mut bytes = UTF8_BOM.to_vec();
+        bytes.extend_from_slice(&raw(""));
+        assert!(run(&bytes).is_ok());
+    }
+
+    #[test]
+    fn duplicate_fields_rejected() {
+        assert!(run(&raw(r#","origin":"https://example.com""#)).is_err());
     }
 
     #[test]

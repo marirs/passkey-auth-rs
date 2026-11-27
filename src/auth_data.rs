@@ -18,8 +18,14 @@
 //! Flag bits (LSB first):
 //!   bit 0 (UP) - user present
 //!   bit 2 (UV) - user verified
+//!   bit 3 (BE) - backup eligible
+//!   bit 4 (BS) - backed up (only valid together with BE)
 //!   bit 6 (AT) - attestedCredentialData present
 //!   bit 7 (ED) - extensionData present
+//!
+//! The data must end exactly where the last present field ends: with ED
+//! set the extensions map is the rest of the data, with ED clear nothing
+//! follows the attested credential data.
 
 use ciborium::value::Value as CborValue;
 
@@ -28,6 +34,8 @@ use crate::types::{CosePublicKey, CredentialId};
 
 pub(crate) const FLAG_UP: u8 = 1 << 0;
 pub(crate) const FLAG_UV: u8 = 1 << 2;
+pub(crate) const FLAG_BE: u8 = 1 << 3;
+pub(crate) const FLAG_BS: u8 = 1 << 4;
 pub(crate) const FLAG_AT: u8 = 1 << 6;
 pub(crate) const FLAG_ED: u8 = 1 << 7;
 
@@ -97,12 +105,20 @@ impl AuthenticatorData {
             None
         };
 
-        // If ED flag set, the remaining bytes are an extensions CBOR
-        // map. We don't use any extensions, so we silently skip - but
-        // we DO check the bytes parse as valid CBOR to catch corruption.
-        if flags & FLAG_ED != 0 && bytes.len() > pos {
-            let _: CborValue = ciborium::de::from_reader(&bytes[pos..])
+        // With ED set the rest is the extensions CBOR map. No extension
+        // is used, but the map must parse and fill the data exactly. With
+        // ED clear, nothing may follow (WebAuthn-3 §6.1).
+        if flags & FLAG_ED != 0 {
+            let mut cur = std::io::Cursor::new(&bytes[pos..]);
+            let extensions: CborValue = ciborium::de::from_reader(&mut cur)
                 .map_err(|_| Error::AuthData("extensions CBOR parse failed"))?;
+            if !extensions.is_map() {
+                return Err(Error::AuthData("extensions are not a CBOR map"));
+            }
+            pos += cur.position() as usize;
+        }
+        if pos != bytes.len() {
+            return Err(Error::AuthData("trailing bytes after authenticator data"));
         }
 
         Ok(Self {
@@ -118,6 +134,15 @@ impl AuthenticatorData {
     }
     pub(crate) fn user_verified(&self) -> bool {
         self.flags & FLAG_UV != 0
+    }
+
+    /// Refuses BS (backed up) without BE (backup eligible), the invalid
+    /// combination of WebAuthn-3 §6.1.3.
+    pub(crate) fn check_backup_flags(&self) -> Result<()> {
+        match self.flags & (FLAG_BE | FLAG_BS) {
+            FLAG_BS => Err(Error::AuthData("BS flag set without BE")),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -180,5 +205,51 @@ mod tests {
     #[test]
     fn too_short_rejected() {
         assert!(AuthenticatorData::parse(&[0u8; 36]).is_err());
+    }
+
+    fn header(flags: u8) -> Vec<u8> {
+        let mut buf = vec![0xAB; 32];
+        buf.push(flags);
+        buf.extend_from_slice(&1u32.to_be_bytes());
+        buf
+    }
+
+    #[test]
+    fn trailing_bytes_without_ed_rejected() {
+        let mut buf = header(FLAG_UP);
+        buf.push(0xa0);
+        assert!(AuthenticatorData::parse(&buf).is_err());
+    }
+
+    #[test]
+    fn extensions_must_fill_the_rest_exactly() {
+        let mut buf = header(FLAG_UP | FLAG_ED);
+        assert!(AuthenticatorData::parse(&buf).is_err(), "ED set, no map");
+        buf.extend_from_slice(&[0xa1, 0x61, b'x', 0xf5]); // {"x": true}
+        assert!(AuthenticatorData::parse(&buf).is_ok());
+        buf.push(0x00);
+        assert!(
+            AuthenticatorData::parse(&buf).is_err(),
+            "byte after the map"
+        );
+        let mut not_map = header(FLAG_UP | FLAG_ED);
+        not_map.push(0x01);
+        assert!(
+            AuthenticatorData::parse(&not_map).is_err(),
+            "extensions not a map"
+        );
+    }
+
+    #[test]
+    fn backup_flag_combinations() {
+        for (flags, ok) in [
+            (0, true),
+            (FLAG_BE, true),
+            (FLAG_BE | FLAG_BS, true),
+            (FLAG_BS, false),
+        ] {
+            let ad = AuthenticatorData::parse(&header(FLAG_UP | flags)).unwrap();
+            assert_eq!(ad.check_backup_flags().is_ok(), ok, "flags {flags:#04x}");
+        }
     }
 }

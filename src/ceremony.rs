@@ -6,7 +6,9 @@ use sha2::{Digest, Sha256};
 use crate::attestation::ParsedAttestation;
 use crate::auth_data::AuthenticatorData;
 use crate::client_data::{self, TYPE_AUTHENTICATE, TYPE_REGISTER};
-use crate::cose::{ALG_EDDSA, ALG_ES256, CoseKey};
+use crate::cose::{ALG_EDDSA, ALG_ES256, ALG_RS256, CoseKey};
+#[cfg(feature = "pqc")]
+use crate::cose::{ALG_ML_DSA_44, ALG_ML_DSA_65, ALG_ML_DSA_87};
 use crate::crypto;
 use crate::error::{Error, Result};
 use crate::types::{
@@ -18,20 +20,34 @@ use crate::types::{
 
 const CEREMONY_TIMEOUT_MS: u32 = 60_000;
 
-/// Algorithms this crate is willing to accept on a registered credential,
-/// in MOST-preferred order (per WebAuthn §5.4.3 the RP advertises a
-/// preference; the authenticator picks one of the listed values).
+/// Algorithms this crate accepts on a registered credential, in
+/// most-preferred order (WebAuthn-3 §5.4.3: the RP advertises a preference;
+/// the authenticator picks one of the listed values).
 ///
-/// Used in two places that must agree:
-///   1. `start_registration` advertises this list to the browser in
-///      `pubKeyCredParams`.
-///   2. `finish_registration` enforces (WebAuthn-3 §7.1 step 19) that
-///      the algorithm of the credential the authenticator actually
-///      returned is one of the advertised values. Without this check a
-///      hostile or buggy authenticator could register a key for any
-///      algorithm our COSE parser happens to support — bypassing the
-///      relying party's algorithm policy.
-const ALLOWED_REGISTRATION_ALGS: &[i64] = &[ALG_ES256, ALG_EDDSA];
+/// [`Webauthn::allowed_algs`] picks the list, and two places must agree on it:
+///   1. `start_registration` advertises it in `pubKeyCredParams`.
+///   2. `finish_registration` enforces (WebAuthn-3 §7.1 step 19) that the
+///      returned credential uses one of the advertised algorithms, so a
+///      hostile or buggy authenticator cannot register a key for any
+///      algorithm the COSE parser happens to support.
+///
+/// ES256 leads because every passkey-class authenticator implements it.
+/// EdDSA covers authenticators that prefer Ed25519, RS256 covers Windows
+/// Hello and TPM-backed keys.
+const CLASSICAL_ALGS: &[i64] = &[ALG_ES256, ALG_EDDSA, ALG_RS256];
+
+/// [`CLASSICAL_ALGS`] with ML-DSA ahead of them, used when the relying
+/// party calls [`Webauthn::allow_ml_dsa`]. Authenticators without ML-DSA
+/// pick a classical algorithm further down the list.
+#[cfg(feature = "pqc")]
+const ML_DSA_ALGS: &[i64] = &[
+    ALG_ML_DSA_44,
+    ALG_ML_DSA_65,
+    ALG_ML_DSA_87,
+    ALG_ES256,
+    ALG_EDDSA,
+    ALG_RS256,
+];
 
 /// Hard ceiling on how old a ceremony state may be when `finish_*` is
 /// called. Slightly larger than `CEREMONY_TIMEOUT_MS` (which is what
@@ -114,6 +130,10 @@ pub struct Webauthn {
     /// non-resident mode, where the user_handle may legitimately be
     /// absent.
     require_user_handle: bool,
+    /// When `true`, ML-DSA leads `pubKeyCredParams` and ML-DSA credentials
+    /// are accepted at registration.
+    #[cfg(feature = "pqc")]
+    ml_dsa: bool,
 }
 
 impl Webauthn {
@@ -152,7 +172,34 @@ impl Webauthn {
             attachment: Attachment::Platform,
             strict_base64: false,
             require_user_handle: false,
+            #[cfg(feature = "pqc")]
+            ml_dsa: false,
         }
+    }
+
+    /// Builder: when `true`, registration offers ML-DSA-44, ML-DSA-65 and
+    /// ML-DSA-87 (COSE algorithms -48, -49, -50) ahead of ES256, EdDSA and
+    /// RS256, and accepts ML-DSA credentials. Authenticators without ML-DSA
+    /// keep registering with a classical algorithm. Default `false`.
+    ///
+    /// Authentication with an ML-DSA credential works whenever the `pqc`
+    /// feature is compiled in, whatever this setting.
+    #[cfg(feature = "pqc")]
+    #[must_use]
+    pub fn allow_ml_dsa(mut self, allow: bool) -> Self {
+        self.ml_dsa = allow;
+        self
+    }
+
+    /// COSE algorithms offered in `pubKeyCredParams` and accepted at
+    /// registration, most preferred first.
+    #[must_use]
+    pub fn allowed_algs(&self) -> &'static [i64] {
+        #[cfg(feature = "pqc")]
+        if self.ml_dsa {
+            return ML_DSA_ALGS;
+        }
+        CLASSICAL_ALGS
     }
 
     /// Builder: when `true`, response-side wire fields are decoded
@@ -286,14 +333,10 @@ impl Webauthn {
                 name: user_name.to_owned(),
                 display_name: user_display_name.to_owned(),
             },
-            // Algorithm preference, MOST-preferred first per the
-            // WebAuthn spec. ES256 leads because every passkey-class
-            // authenticator (Touch ID, Windows Hello, Android, Yubikey)
-            // implements it; EdDSA is a fallback for the small set of
-            // authenticators that prefer Ed25519 (some Yubikey 5+).
-            // Sourced from `ALLOWED_REGISTRATION_ALGS` so the advertise-
-            // and-enforce sides cannot drift.
-            pub_key_cred_params: ALLOWED_REGISTRATION_ALGS
+            // Sourced from `allowed_algs` so the advertise and enforce
+            // sides cannot drift.
+            pub_key_cred_params: self
+                .allowed_algs()
                 .iter()
                 .map(|&alg| PubKeyCredParam {
                     kind: "public-key",
@@ -362,6 +405,9 @@ impl Webauthn {
         if self.require_uv && !att.auth_data.user_verified() {
             return Err(Error::UserNotVerified);
         }
+        // WebAuthn-3 §7.1 step 17: BS (backed up) without BE (backup
+        // eligible) is an invalid combination.
+        att.auth_data.check_backup_flags()?;
 
         // 5. AT flag MUST be set on registration; we need the attested
         // credential data to extract the public key.
@@ -379,10 +425,9 @@ impl Webauthn {
         // the algorithms the RP advertised in pubKeyCredParams. Without
         // this check a hostile or buggy authenticator could register a
         // key for any algorithm our COSE parser supports, bypassing the
-        // RP's algorithm policy. We source the allowed list from the
-        // same const start_registration used to build the challenge, so
-        // the advertise side and the enforce side cannot drift.
-        if !ALLOWED_REGISTRATION_ALGS.contains(&cose.alg()) {
+        // RP's algorithm policy. `allowed_algs` also built the challenge,
+        // so the advertise side and the enforce side cannot drift.
+        if !self.allowed_algs().contains(&cose.alg()) {
             return Err(Error::UnsupportedAlg(cose.alg()));
         }
 
@@ -591,6 +636,16 @@ impl Webauthn {
         // When state.user_handle = None (the ceremony was started via
         // start_authentication{,_with_creds}) the check is skipped
         // entirely — the caller has no expected value to compare.
+        //
+        // A ceremony with an empty allow list and no expected user is a
+        // discoverable-credential flow: the caller identifies the user by
+        // `userHandle`, so WebAuthn-3 §7.2 step 6 requires it to be present.
+        if state.allow_credentials.is_empty()
+            && state.user_handle.is_none()
+            && response.user_handle.is_none()
+        {
+            return Err(Error::UserHandleMismatch);
+        }
         if let Some(expected) = &state.user_handle {
             match response.user_handle.as_deref() {
                 Some(got_b64) => {
@@ -629,6 +684,8 @@ impl Webauthn {
         if self.require_uv && !ad.user_verified() {
             return Err(Error::UserNotVerified);
         }
+        // WebAuthn-3 §7.2 step 16.
+        ad.check_backup_flags()?;
 
         // 4. Verify the signature: signedMsg = authData || cdjHash.
         let key = CoseKey::parse(stored.public_key_cose.as_bytes())?;
@@ -712,7 +769,8 @@ mod tests {
         let wa = Webauthn::new("example.com", "Example", "https://example.com");
         let (chal, _) = wa.start_registration(b"u", "u", "U", &[]);
         let advertised: Vec<i64> = chal.pub_key_cred_params.iter().map(|p| p.alg).collect();
-        assert_eq!(advertised, ALLOWED_REGISTRATION_ALGS);
+        assert_eq!(advertised, wa.allowed_algs());
+        assert_eq!(advertised, [ALG_ES256, ALG_EDDSA, ALG_RS256]);
     }
 
     #[test]
