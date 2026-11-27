@@ -239,9 +239,9 @@ fn sid_or_new(cookies: &CookieJar<'_>) -> String {
 }
 
 fn rand_bytes(n: usize) -> Vec<u8> {
-    use rand::RngCore;
+    use rand::Rng as _;
     let mut buf = vec![0u8; n];
-    rand::thread_rng().fill_bytes(&mut buf);
+    rand::rng().fill_bytes(&mut buf);
     buf
 }
 

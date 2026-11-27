@@ -54,7 +54,7 @@ impl AttestationCert {
             Certificate::from_der(der).map_err(|e| Error::Cbor(format!("x509 parse: {e}")))?;
 
         // ---- public key ----------------------------------------------
-        let spki = &cert.tbs_certificate.subject_public_key_info;
+        let spki = cert.tbs_certificate().subject_public_key_info();
         // Algorithm must be id-ecPublicKey with an algorithm parameter
         // selecting P-256. We only support ES256 in this crate.
         if spki.algorithm.oid != ID_EC_PUBLIC_KEY {
@@ -87,9 +87,8 @@ impl AttestationCert {
         // check in verify_packed by intentionally garbling the inner
         // OCTET STRING.
         let aaguid_ext = cert
-            .tbs_certificate
-            .extensions
-            .as_ref()
+            .tbs_certificate()
+            .extensions()
             .and_then(|exts| exts.iter().find(|e| e.extn_id == OID_FIDO_AAGUID));
         let aaguid = match aaguid_ext {
             Some(ext) => Some(parse_aaguid_octet_string(ext.extn_value.as_bytes())?),

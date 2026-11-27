@@ -99,9 +99,9 @@ impl Store {
         drop(q);
         // First run: mint a fresh user_handle.
         let handle = {
-            use rand::RngCore;
+            use rand::Rng as _;
             let mut buf = vec![0u8; 16];
-            rand::thread_rng().fill_bytes(&mut buf);
+            rand::rng().fill_bytes(&mut buf);
             buf
         };
         self.conn.execute(
@@ -371,9 +371,9 @@ struct AuthFinishReply {
 
 fn get_or_create_sid(cookies: &HeaderMap) -> String {
     sid_from_cookies(cookies).unwrap_or_else(|| {
-        use rand::RngCore;
+        use rand::Rng as _;
         let mut buf = [0u8; 16];
-        rand::thread_rng().fill_bytes(&mut buf);
+        rand::rng().fill_bytes(&mut buf);
         hex::encode(buf)
     })
 }

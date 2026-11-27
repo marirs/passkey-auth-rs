@@ -243,7 +243,7 @@ fn verify_packed(
             }
 
             // Verify the signature with the cert's public key.
-            verify_es256_sec1(&leaf.p256_pubkey_sec1, &msg, &stmt.sig)
+            crypto::verify_es256_sec1(&leaf.p256_pubkey_sec1, &msg, &stmt.sig)
         }
     }
 }
@@ -330,25 +330,5 @@ fn verify_fido_u2f(
     pre_image.extend_from_slice(cred_x);
     pre_image.extend_from_slice(cred_y);
 
-    verify_es256_sec1(&leaf.p256_pubkey_sec1, &pre_image, &sig)
-}
-
-// ---------- helper: verify with a raw SEC1-encoded P-256 key ----------------
-
-/// Verify a DER-encoded ECDSA-P-256 signature using a SEC1
-/// uncompressed-point public key. Identical to `crypto::verify` for
-/// ES256 but takes the key bytes directly rather than a `CoseKey`,
-/// since attestation-cert keys are not COSE-encoded.
-fn verify_es256_sec1(sec1: &[u8; 65], msg: &[u8], sig: &[u8]) -> Result<()> {
-    use p256::ecdsa::signature::Verifier;
-    use p256::ecdsa::{Signature as EsSig, VerifyingKey as EsKey};
-    use p256::elliptic_curve::sec1::FromEncodedPoint;
-    use p256::{EncodedPoint, PublicKey};
-
-    let point = EncodedPoint::from_bytes(sec1).map_err(|_| Error::BadSignature)?;
-    let pk = PublicKey::from_encoded_point(&point);
-    let pk = Option::<PublicKey>::from(pk).ok_or(Error::BadSignature)?;
-    let vk = EsKey::from(&pk);
-    let parsed = EsSig::from_der(sig).map_err(|_| Error::BadSignature)?;
-    vk.verify(msg, &parsed).map_err(|_| Error::BadSignature)
+    crypto::verify_es256_sec1(&leaf.p256_pubkey_sec1, &pre_image, &sig)
 }

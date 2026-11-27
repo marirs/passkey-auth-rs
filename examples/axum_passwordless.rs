@@ -345,9 +345,9 @@ fn json_with_sid<T: Serialize>(body: &T, sid: &str) -> Response {
 }
 
 fn hex_random(n: usize) -> String {
-    use rand::RngCore;
+    use rand::Rng as _;
     let mut buf = vec![0u8; n];
-    rand::thread_rng().fill_bytes(&mut buf);
+    rand::rng().fill_bytes(&mut buf);
     hex::encode(buf)
 }
 

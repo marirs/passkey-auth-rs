@@ -15,23 +15,26 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use ciborium::value::Value as CborValue;
 use p256::ecdsa::{Signature as EsSig, SigningKey, signature::Signer};
+use p256::elliptic_curve::Generate as _;
 use p256::pkcs8::EncodePublicKey;
 use sha2::{Digest, Sha256};
-use x509_cert::builder::{Builder, CertificateBuilder, Profile};
+use x509_cert::builder::profile::BuilderProfile;
+use x509_cert::builder::{Builder, CertificateBuilder};
+use x509_cert::certificate::TbsCertificate;
 use x509_cert::der::asn1::OctetString;
 use x509_cert::der::{Encode, oid::AssociatedOid};
-use x509_cert::ext::{AsExtension, Extension};
+use x509_cert::ext::{Criticality, Extension};
 use x509_cert::name::Name;
 use x509_cert::serial_number::SerialNumber;
-use x509_cert::spki::SubjectPublicKeyInfoOwned;
+use x509_cert::spki::{SubjectPublicKeyInfoOwned, SubjectPublicKeyInfoRef};
 use x509_cert::time::Validity;
 
 // ---------- AAGUID extension (custom) ----------------------------------------
 
-/// Thin wrapper that implements x509-cert's AsExtension trait so we can
+/// Thin wrapper that implements x509-cert's extension traits so we can
 /// add the FIDO AAGUID extension to a synthetic cert. The on-wire shape
 /// is OCTET STRING (16 bytes); the outer OCTET STRING wrapping is done
-/// automatically by AsExtension::to_extension.
+/// automatically by ToExtension::to_extension.
 #[derive(Clone, Debug)]
 struct FidoAaguid([u8; 16]);
 
@@ -49,8 +52,8 @@ impl x509_cert::der::Encode for FidoAaguid {
     }
 }
 
-impl AsExtension for FidoAaguid {
-    fn critical(&self, _subject: &Name, _exts: &[Extension]) -> bool {
+impl Criticality for FidoAaguid {
+    fn criticality(&self, _subject: &Name, _exts: &[Extension]) -> bool {
         false
     }
 }
@@ -81,8 +84,8 @@ impl x509_cert::der::Encode for MalformedAaguid {
     }
 }
 
-impl AsExtension for MalformedAaguid {
-    fn critical(&self, _subject: &Name, _exts: &[Extension]) -> bool {
+impl Criticality for MalformedAaguid {
+    fn criticality(&self, _subject: &Name, _exts: &[Extension]) -> bool {
         false
     }
 }
@@ -118,7 +121,7 @@ impl CertBundle {
     /// Mint a fresh self-signed leaf cert with the requested AAGUID
     /// extension shape.
     fn new(aaguid: AaguidExt) -> Self {
-        let signing_key = SigningKey::random(&mut rand::thread_rng());
+        let signing_key = SigningKey::generate_from_rng(&mut rand::rng());
         let verifying_key = signing_key.verifying_key();
 
         // SubjectPublicKeyInfo for the verifying key, in PKCS8/SEC1 form.
@@ -130,26 +133,15 @@ impl CertBundle {
         let spki =
             SubjectPublicKeyInfoOwned::try_from(pk_der.as_slice()).expect("SPKI from p256 DER");
 
-        let subject = Name::from_str("CN=passkey-auth test attestation")
-            .expect("name parse")
-            .to_der()
-            .expect("name to DER");
-        let subject = Name::from_der_slice(&subject);
+        let subject = Name::from_str("CN=passkey-auth test attestation").expect("name parse");
 
-        // Use Leaf profile (no constraints, no SAN). We are a leaf cert
+        // Self-issued leaf with no profile extensions. We are a leaf cert
         // in a one-cert chain; that's all the FIDO format needs.
-        let profile = Profile::Leaf {
-            issuer: subject.clone(),
-            enable_key_agreement: false,
-            enable_key_encipherment: false,
-        };
         let mut builder = CertificateBuilder::new(
-            profile,
+            SelfIssuedLeaf(subject),
             SerialNumber::from(1u32),
             Validity::from_now(Duration::from_secs(60 * 60)).expect("validity"),
-            subject,
             spki,
-            &signing_key,
         )
         .expect("CertificateBuilder::new");
 
@@ -172,7 +164,7 @@ impl CertBundle {
         }
 
         let cert: x509_cert::Certificate = builder
-            .build::<p256::ecdsa::DerSignature>()
+            .build::<_, p256::ecdsa::DerSignature>(&signing_key)
             .expect("cert build");
         let cert_der = cert.to_der().expect("cert to DER");
 
@@ -183,15 +175,24 @@ impl CertBundle {
     }
 }
 
-// Tiny shim because x509-cert's `from_der` returns a Result we
-// always unwrap in this test file.
-trait FromDerSlice: Sized {
-    fn from_der_slice(der: &[u8]) -> Self;
-}
-impl FromDerSlice for Name {
-    fn from_der_slice(der: &[u8]) -> Self {
-        use x509_cert::der::Decode;
-        Self::from_der(der).expect("Name from DER")
+/// Builder profile for a self-issued leaf cert that adds no extensions
+/// of its own; the tests add the FIDO AAGUID extension explicitly.
+struct SelfIssuedLeaf(Name);
+
+impl BuilderProfile for SelfIssuedLeaf {
+    fn get_issuer(&self, subject: &Name) -> Name {
+        subject.clone()
+    }
+    fn get_subject(&self) -> Name {
+        self.0.clone()
+    }
+    fn build_extensions(
+        &self,
+        _spk: SubjectPublicKeyInfoRef<'_>,
+        _issuer_spk: SubjectPublicKeyInfoRef<'_>,
+        _tbs: &TbsCertificate,
+    ) -> x509_cert::builder::Result<Vec<Extension>> {
+        Ok(Vec::new())
     }
 }
 
@@ -212,9 +213,9 @@ struct CredKey {
 
 impl CredKey {
     fn new() -> Self {
-        let signing_key = SigningKey::random(&mut rand::thread_rng());
+        let signing_key = SigningKey::generate_from_rng(&mut rand::rng());
         let vk = signing_key.verifying_key();
-        let pt = vk.to_encoded_point(false);
+        let pt = vk.to_sec1_point(false);
         let mut x = [0u8; 32];
         let mut y = [0u8; 32];
         x.copy_from_slice(&pt.x().unwrap()[..]);

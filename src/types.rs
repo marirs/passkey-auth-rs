@@ -11,7 +11,7 @@ use base64::engine::general_purpose::{
     STANDARD as B64STD, STANDARD_NO_PAD as B64STD_NO_PAD, URL_SAFE as B64URL_PAD,
     URL_SAFE_NO_PAD as B64URL,
 };
-use rand::RngCore;
+use rand::Rng as _;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -24,11 +24,11 @@ use crate::error::{Error, Result};
 pub struct Challenge(pub Vec<u8>);
 
 impl Challenge {
-    /// Cryptographic random; uses `rand::thread_rng()` (OS CSPRNG).
+    /// Cryptographic random; uses `rand::rng()`, the thread-local CSPRNG seeded from the OS.
     #[must_use]
     pub fn random() -> Self {
         let mut buf = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut buf);
+        rand::rng().fill_bytes(&mut buf);
         Self(buf.to_vec())
     }
 

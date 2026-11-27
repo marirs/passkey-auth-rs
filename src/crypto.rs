@@ -11,8 +11,6 @@
 
 use ed25519_dalek::{Signature as EdSig, Verifier as _, VerifyingKey as EdKey};
 use p256::ecdsa::{Signature as EsSig, VerifyingKey as EsKey};
-use p256::elliptic_curve::sec1::FromEncodedPoint;
-use p256::{EncodedPoint, PublicKey};
 
 use crate::cose::CoseKey;
 use crate::error::{Error, Result};
@@ -34,10 +32,14 @@ fn verify_es256(x: &[u8; 32], y: &[u8; 32], msg: &[u8], sig: &[u8]) -> Result<()
     sec1[0] = 0x04;
     sec1[1..33].copy_from_slice(x);
     sec1[33..65].copy_from_slice(y);
-    let point = EncodedPoint::from_bytes(sec1).map_err(|_| Error::BadSignature)?;
-    let pk = PublicKey::from_encoded_point(&point);
-    let pk = Option::<PublicKey>::from(pk).ok_or(Error::BadSignature)?;
-    let vk = EsKey::from(&pk);
+    verify_es256_sec1(&sec1, msg, sig)
+}
+
+/// Verifies a DER-encoded ECDSA P-256 signature with a SEC1-encoded
+/// public key. Attestation certificates carry their key in this form,
+/// so the `packed` and `fido-u2f` paths call it directly.
+pub(crate) fn verify_es256_sec1(sec1: &[u8], msg: &[u8], sig: &[u8]) -> Result<()> {
+    let vk = EsKey::from_sec1_bytes(sec1).map_err(|_| Error::BadSignature)?;
 
     // WebAuthn ES256 signatures are DER-encoded ECDSA. p256 has a
     // direct `from_der` parser.
@@ -70,12 +72,13 @@ mod tests {
     use super::*;
     use ed25519_dalek::{Signer as _, SigningKey};
     use p256::ecdsa::SigningKey as EsSigningKey;
-    use rand::RngCore;
+    use p256::elliptic_curve::Generate as _;
+    use rand::Rng as _;
 
     #[test]
     fn ed25519_round_trip() {
         let mut seed = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut seed);
+        rand::rng().fill_bytes(&mut seed);
         let sk = SigningKey::from_bytes(&seed);
         let vk_bytes = sk.verifying_key().to_bytes();
         let msg = b"hello passkey world";
@@ -91,9 +94,9 @@ mod tests {
 
     #[test]
     fn es256_round_trip() {
-        let sk = EsSigningKey::random(&mut rand::thread_rng());
+        let sk = EsSigningKey::generate_from_rng(&mut rand::rng());
         let vk = sk.verifying_key();
-        let pt = vk.to_encoded_point(false);
+        let pt = vk.to_sec1_point(false);
         let xs = pt.x().expect("x coord");
         let ys = pt.y().expect("y coord");
         let mut x = [0u8; 32];
