@@ -661,7 +661,9 @@ impl Webauthn {
         if let Some(expected) = &state.user_handle {
             match response.user_handle.as_deref() {
                 Some(got_b64) => {
-                    let mut buf = [0u8; 64]; // WebAuthn user handles are at most 64 bytes
+                    // User handles are at most 64 bytes; base64 decoding needs
+                    // room for its length estimate on top.
+                    let mut buf = [0u8; 96];
                     if *self.decode_b64_into(got_b64, &mut buf)? != **expected {
                         return Err(Error::UserHandleMismatch);
                     }
