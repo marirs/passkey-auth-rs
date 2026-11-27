@@ -6,12 +6,15 @@
 //! [`RegistrationResponse`] / [`AuthenticationResponse`] so a Rocket
 //! handler can deserialize directly off the request body.
 
-use base64::Engine;
+use std::borrow::Cow;
+
+use base64::engine::GeneralPurpose;
 use base64::engine::general_purpose::{
     STANDARD as B64STD, STANDARD_NO_PAD as B64STD_NO_PAD, URL_SAFE as B64URL_PAD,
     URL_SAFE_NO_PAD as B64URL,
 };
-use rand::RngCore;
+use base64::{DecodeSliceError, Engine};
+use rand::Rng as _;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -24,14 +27,15 @@ use crate::error::{Error, Result};
 pub struct Challenge(pub Vec<u8>);
 
 impl Challenge {
-    /// Cryptographic random; uses `rand::thread_rng()` (OS CSPRNG).
+    /// Cryptographic random; uses `rand::rng()`, the thread-local CSPRNG seeded from the OS.
     #[must_use]
     pub fn random() -> Self {
         let mut buf = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut buf);
+        rand::rng().fill_bytes(&mut buf);
         Self(buf.to_vec())
     }
 
+    /// The raw challenge bytes.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
@@ -53,14 +57,18 @@ impl Challenge {
 pub struct CredentialId(pub Vec<u8>);
 
 impl CredentialId {
+    /// The raw credential ID bytes.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
+    /// Encodes the ID as base64url without padding, the WebAuthn wire form.
     #[must_use]
     pub fn to_b64url(&self) -> String {
         B64URL.encode(&self.0)
     }
+    /// Decodes an ID from base64url, accepting the same variants as the
+    /// lenient response decoder (padding, standard alphabet).
     pub fn from_b64url(s: &str) -> Result<Self> {
         b64url_decode(s).map(Self)
     }
@@ -77,6 +85,7 @@ impl CredentialId {
 pub struct CosePublicKey(pub Vec<u8>);
 
 impl CosePublicKey {
+    /// The COSE_Key CBOR bytes.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
@@ -145,6 +154,7 @@ impl RpId {
         Ok(Self(trimmed.to_owned()))
     }
 
+    /// The RP ID string.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
@@ -165,7 +175,7 @@ impl RpId {
 /// For strict spec-conformant decoding (rejects everything except
 /// url-safe-no-pad), see [`b64url_decode_strict`]. Production
 /// deployments that control the client JS should prefer the strict
-/// form via [`Webauthn::strict_base64`].
+/// form via [`crate::Webauthn::strict_base64`].
 pub(crate) fn b64url_decode(s: &str) -> Result<Vec<u8>> {
     // 1. spec-compliant: url-safe, no padding
     if let Ok(v) = B64URL.decode(s) {
@@ -195,6 +205,40 @@ pub(crate) fn b64url_decode_strict(s: &str) -> Result<Vec<u8>> {
     B64URL.decode(s).map_err(|e| Error::Base64(e.to_string()))
 }
 
+/// Decodes `s` into `buf` with the alphabets of [`b64url_decode`] (only
+/// url-safe-no-pad when `strict`), so short fields such as challenges,
+/// credential IDs and user handles need no allocation. A value too long
+/// for `buf` falls back to an allocated buffer, with the same result.
+pub(crate) fn b64url_decode_into<'b>(
+    s: &str,
+    buf: &'b mut [u8],
+    strict: bool,
+) -> Result<Cow<'b, [u8]>> {
+    let engines: &[&GeneralPurpose] = if strict {
+        &[&B64URL]
+    } else {
+        &[&B64URL, &B64URL_PAD, &B64STD_NO_PAD, &B64STD]
+    };
+    let mut error = None;
+    for engine in engines {
+        match engine.decode_slice(s, buf) {
+            Ok(len) => return Ok(Cow::Borrowed(&buf[..len])),
+            Err(DecodeSliceError::DecodeError(e)) => error = Some(e),
+            Err(DecodeSliceError::OutputSliceTooSmall) => {
+                let decode = if strict {
+                    b64url_decode_strict
+                } else {
+                    b64url_decode
+                };
+                return decode(s).map(Cow::Owned);
+            }
+        }
+    }
+    Err(Error::Base64(
+        error.map(|e| e.to_string()).unwrap_or_default(),
+    ))
+}
+
 // ---------- Wire structs (request bodies) -------------------------------
 
 /// JSON body posted by the client to finish a registration ceremony.
@@ -220,6 +264,7 @@ pub struct RegistrationResponse {
 /// JSON body posted by the client to finish an authentication ceremony.
 #[derive(Debug, Deserialize)]
 pub struct AuthenticationResponse {
+    /// The base64url-encoded raw credential ID.
     pub id: String,
     /// Raw authenticator data, base64url-encoded.
     #[serde(rename = "authenticatorData")]
@@ -227,10 +272,13 @@ pub struct AuthenticationResponse {
     /// Signature over `authenticatorData || SHA-256(clientDataJSON)`,
     /// base64url-encoded.
     pub signature: String,
+    /// The clientDataJSON (UTF-8 JSON), base64url-encoded.
     #[serde(rename = "clientDataJSON")]
     pub client_data_json: String,
-    /// User handle (the opaque user id we registered with). Optional;
-    /// only present for discoverable credentials. Currently informational.
+    /// User handle (the opaque user id registered with the credential),
+    /// base64url-encoded. Always present for discoverable credentials;
+    /// `finish_authentication` requires it in discoverable flows and
+    /// compares it in flows started for a known user.
     #[serde(rename = "userHandle", default)]
     pub user_handle: Option<String>,
 }
@@ -242,77 +290,104 @@ pub struct AuthenticationResponse {
 /// to decode them before passing to the WebAuthn API.
 #[derive(Debug, Serialize)]
 pub struct RegistrationChallenge {
-    pub challenge: String, // base64url
+    /// The challenge, base64url-encoded.
+    pub challenge: String,
+    /// The relying party.
     pub rp: RpInfo,
+    /// The user the credential is created for.
     pub user: UserInfo,
+    /// Accepted COSE algorithms, most preferred first.
     #[serde(rename = "pubKeyCredParams")]
     pub pub_key_cred_params: Vec<PubKeyCredParam>,
     /// Credentials we already have for this user - browser SHOULD
     /// refuse to register a duplicate.
     #[serde(rename = "excludeCredentials", skip_serializing_if = "Vec::is_empty")]
     pub exclude_credentials: Vec<CredentialDescriptor>,
-    pub timeout: u32, // milliseconds
+    /// Ceremony timeout in milliseconds.
+    pub timeout: u32,
+    /// Authenticator attachment, resident key and user verification hints.
     #[serde(rename = "authenticatorSelection")]
     pub authenticator_selection: AuthenticatorSelection,
-    pub attestation: &'static str, // "none"
+    /// Attestation conveyance preference; always `"none"`.
+    pub attestation: &'static str,
 }
 
+/// `rp` member of the registration options.
 #[derive(Debug, Serialize)]
 pub struct RpInfo {
+    /// The relying party ID.
     pub id: String,
+    /// Human-readable relying party name.
     pub name: String,
 }
 
+/// `user` member of the registration options.
 #[derive(Debug, Serialize)]
 pub struct UserInfo {
-    pub id: String, // base64url
+    /// The user handle, base64url-encoded.
+    pub id: String,
+    /// Account name, such as an email address.
     pub name: String,
+    /// Name shown to the user.
     #[serde(rename = "displayName")]
     pub display_name: String,
 }
 
+/// One entry of `pubKeyCredParams`.
 #[derive(Debug, Serialize)]
 pub struct PubKeyCredParam {
+    /// Always `"public-key"`.
     #[serde(rename = "type")]
-    pub kind: &'static str, // "public-key"
+    pub kind: &'static str,
+    /// COSE algorithm identifier.
     pub alg: i64,
 }
 
+/// One entry of `excludeCredentials` or `allowCredentials`.
 #[derive(Debug, Serialize)]
 pub struct CredentialDescriptor {
+    /// Always `"public-key"`.
     #[serde(rename = "type")]
-    pub kind: &'static str, // "public-key"
-    pub id: String, // base64url
+    pub kind: &'static str,
+    /// The credential ID, base64url-encoded.
+    pub id: String,
+    /// Transports the browser may try; omitted when empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub transports: Vec<String>,
 }
 
+/// `authenticatorSelection` member of the registration options.
 #[derive(Debug, Serialize, Clone)]
 pub struct AuthenticatorSelection {
-    /// Pins the ceremony to a particular authenticator class. We set
-    /// this to `"platform"` so the browser only offers built-in
-    /// authenticators (Touch ID, Windows Hello, Android biometrics) -
-    /// roaming/USB hardware keys aren't part of the supported flow.
+    /// Authenticator class from [`crate::Attachment`]: `"platform"` (the
+    /// default), `"cross-platform"`, or omitted for any.
     #[serde(
         rename = "authenticatorAttachment",
         skip_serializing_if = "Option::is_none"
     )]
     pub authenticator_attachment: Option<&'static str>,
+    /// Discoverable credential preference; `"preferred"`.
     #[serde(rename = "residentKey", skip_serializing_if = "Option::is_none")]
     pub resident_key: Option<&'static str>,
+    /// `"required"` or `"preferred"`, following `require_user_verification`.
     #[serde(rename = "userVerification")]
-    pub user_verification: &'static str, // "preferred"
+    pub user_verification: &'static str,
 }
 
 /// What we send to the browser for `navigator.credentials.get()`.
 #[derive(Debug, Serialize)]
 pub struct AuthenticationChallenge {
-    pub challenge: String, // base64url
+    /// The challenge, base64url-encoded.
+    pub challenge: String,
+    /// The relying party ID.
     #[serde(rename = "rpId")]
     pub rp_id: String,
+    /// Ceremony timeout in milliseconds.
     pub timeout: u32,
+    /// Credentials the browser may use; empty for discoverable flows.
     #[serde(rename = "allowCredentials", skip_serializing_if = "Vec::is_empty")]
     pub allow_credentials: Vec<CredentialDescriptor>,
+    /// `"required"` or `"preferred"`, following `require_user_verification`.
     #[serde(rename = "userVerification")]
     pub user_verification: &'static str,
 }
@@ -331,7 +406,9 @@ pub struct AuthenticationChallenge {
 /// accept a registration response from yesterday.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistrationState {
+    /// The challenge issued to the browser.
     pub challenge: Challenge,
+    /// The user handle the credential is created for.
     pub user_id: Vec<u8>,
     /// Unix timestamp (seconds, UTC) when `start_registration` was
     /// called. Stable serialization-friendly form.
@@ -350,8 +427,11 @@ impl RegistrationState {
     }
 }
 
+/// Per-ceremony state retained between `start_authentication*` and
+/// `finish_authentication`; see [`RegistrationState`] for how to store it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthenticationState {
+    /// The challenge issued to the browser.
     pub challenge: Challenge,
     /// Credentials the browser was allowed to use, so finish_* can
     /// verify the asserted credential id is one of them.
@@ -405,9 +485,13 @@ pub(crate) fn now_secs() -> u64 {
 /// transparent byte vecs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PasskeyCredential {
+    /// Credential ID the authenticator assigned.
     pub id: CredentialId,
+    /// Credential public key as the COSE_Key the authenticator sent.
     pub public_key_cose: CosePublicKey,
+    /// Last signature counter seen; update it from [`AuthSuccess::new_counter`].
     pub counter: u32,
+    /// Transports the browser reported at registration.
     pub transports: Vec<String>,
     /// Authenticator AAGUID, as carried in attestedCredentialData.
     ///
@@ -429,8 +513,11 @@ pub struct PasskeyCredential {
 /// or forward the outcome as JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthSuccess {
+    /// The credential that signed the assertion.
     pub credential_id: CredentialId,
+    /// Signature counter from the assertion, to store with the credential.
     pub new_counter: u32,
+    /// Whether the authenticator set the UV flag.
     pub user_verified: bool,
 }
 
@@ -477,6 +564,37 @@ mod tests {
     #[test]
     fn rejects_garbage() {
         assert!(b64url_decode("!!!not-base64!!!").is_err());
+    }
+
+    #[test]
+    fn decode_into_matches_decode() {
+        for encoded in [
+            B64URL.encode(SAMPLE),
+            B64URL_PAD.encode(SAMPLE),
+            B64STD_NO_PAD.encode(SAMPLE),
+            B64STD.encode(SAMPLE),
+            "!!!not-base64!!!".to_owned(),
+        ] {
+            for strict in [false, true] {
+                let mut buf = [0u8; 64];
+                let into = b64url_decode_into(&encoded, &mut buf, strict).map(Cow::into_owned);
+                let decode = if strict {
+                    b64url_decode_strict
+                } else {
+                    b64url_decode
+                };
+                assert_eq!(
+                    into.ok(),
+                    decode(&encoded).ok(),
+                    "{encoded} strict={strict}"
+                );
+            }
+        }
+        let long = B64URL.encode([7u8; 200]);
+        let mut small = [0u8; 8];
+        let decoded = b64url_decode_into(&long, &mut small, true).unwrap();
+        assert!(matches!(decoded, Cow::Owned(_)));
+        assert_eq!(&*decoded, &[7u8; 200][..]);
     }
 
     // ---- RpId ----------------------------------------------------------

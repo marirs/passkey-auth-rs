@@ -1,8 +1,8 @@
 [package]
 name        = "passkey-auth"
-version     = "0.1.3"
+version     = "0.2.0"
 edition     = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 license     = "MIT OR Apache-2.0"
 description = "Pure-Rust WebAuthn server library focused on passkeys (no openssl)."
 repository  = "https://github.com/marirs/passkey-auth-rs"
@@ -10,6 +10,10 @@ readme      = "README.md"
 keywords    = ["webauthn", "passkey", "fido2", "authentication"]
 categories  = ["authentication", "cryptography"]
 authors     = ["Sriram <marirs@gmail.com>"]
+exclude     = ["fuzz/", ".github/"]
+
+[package.metadata.docs.rs]
+features = ["pqc"]
 
 [lib]
 name = "passkey_auth"
@@ -17,16 +21,13 @@ path = "src/lib.rs"
 
 [dependencies]
 # Crypto, all rustcrypto / pure-Rust. No openssl anywhere in the tree.
-p256          = { version = "0.13", features = ["ecdsa"] }
-ed25519-dalek = { version = "2", features = ["pkcs8"] }
-sha2          = "0.10"
-rand          = "0.8"
-
-# CBOR for COSE keys + attestationObject.
-ciborium      = "0.2"
+p256          = { version = "0.14", features = ["ecdsa"] }
+ed25519-dalek = { version = "3", features = ["pkcs8"] }
+sha2          = "0.11"
+rand          = "0.10"
 
 # Base64URL for credential IDs, challenges, raw byte fields on the wire.
-base64        = "0.22"
+base64        = "0.23"
 
 # JSON for clientDataJSON parsing.
 serde         = { version = "1", features = ["derive"] }
@@ -42,43 +43,77 @@ url           = "2"
 # formats. Pure-Rust, RustCrypto family - no openssl. We extract the
 # leaf cert's SubjectPublicKey and any AAGUID extension; we do NOT
 # validate the chain (see README scope note).
-x509-cert     = { version = "0.2", features = ["std"] }
-const-oid     = "0.9"
+x509-cert     = { version = "0.3", features = ["std"] }
+const-oid     = "0.10"
+
+# RS256 (RSASSA-PKCS1-v1_5 with SHA-256) for credentials and packed
+# attestation certificates. Public-key operations only.
+rsa           = { version = "0.10", default-features = false, features = ["std", "encoding", "pkcs1v15"] }
+
+# ML-DSA (FIPS 204) verification behind the `pqc` feature.
+ml-dsa        = { version = "0.1.2", default-features = false, features = ["alloc"], optional = true }
+
+[features]
+default = []
+# ML-DSA-44/65/87 credentials (COSE algorithms -48/-49/-50, RFC 9964).
+pqc     = ["dep:ml-dsa"]
+# Exposes the parsers to the fuzz targets in fuzz/ and the parser
+# benchmarks in benches/. Not part of the public API; no semver promise.
+__internals = []
 
 [dev-dependencies]
 # Known-vector regression tests live under tests/.
 hex           = "0.4"
 # Integration tests synthesise authenticator output so they need the
 # same crypto + encoding primitives the real authenticator would use.
-base64        = "0.22"
+base64        = "0.23"
+# CBOR encoding for synthetic authenticator output. The library reads
+# CBOR with its own borrowing decoder (src/cbor.rs).
 ciborium      = "0.2"
-ed25519-dalek = { version = "2", features = ["pkcs8", "rand_core"] }
+ed25519-dalek = { version = "3", features = ["pkcs8", "rand_core"] }
 # `oid` feature so sha2 implements AssociatedOid - needed when the
 # x509-cert builder asks for the signature-algorithm identifier.
-sha2          = { version = "0.10", features = ["oid"] }
-rand          = "0.8"
+sha2          = { version = "0.11", features = ["oid"] }
+rand          = "0.10"
 # Re-enable p256's pkcs8 + pem features in dev builds so SigningKey
 # implements SignatureAlgorithmIdentifier (required by x509-cert's
 # builder). Cargo merges this with the regular dep's feature set; the
 # library never imports anything PEM-related at runtime.
-p256          = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] }
+p256          = { version = "0.14", features = ["ecdsa", "pkcs8", "pem"] }
 # The {axum,rocket}_server examples wire the crate into a real HTTP
 # server so you can register / authenticate a real passkey in your
 # browser.
-axum          = "0.7"
+axum          = "0.8"
 tokio         = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
-tower-http    = { version = "0.6", features = ["fs", "cors"] }
+tower-http    = { version = "0.7", features = ["fs", "cors"] }
 rocket        = { version = "0.5", features = ["json"] }
 
 # x509-cert with the `builder` feature so attestation tests can mint
 # a self-signed P-256 cert at runtime. Used by integration tests
 # under tests/.
-x509-cert     = { version = "0.2", features = ["builder", "std"] }
+x509-cert     = { version = "0.3", features = ["builder", "std"] }
 
 # Persistent storage for the axum_sqlite example. `bundled` ships
 # the SQLite amalgamation so the example builds on machines that do
 # not have sqlite installed system-wide (notably Windows CI).
-rusqlite      = { version = "0.32", features = ["bundled"] }
+rusqlite      = { version = "0.43", features = ["bundled"] }
+
+# RS256 and ML-DSA signing for the synthetic authenticator in
+# tests/support (test keys only).
+rsa           = { version = "0.10", default-features = false, features = ["std", "encoding", "pkcs1v15"] }
+ml-dsa        = { version = "0.1.2", default-features = false, features = ["alloc"] }
+
+# Benchmarks under benches/.
+criterion     = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name    = "verify"
+harness = false
+
+[[bench]]
+name              = "parsers"
+harness           = false
+required-features = ["__internals"]
 
 [[example]]
 name = "axum_server"

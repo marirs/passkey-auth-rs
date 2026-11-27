@@ -1,37 +1,59 @@
 //! High-level register / authenticate flow. Wires the parsers + the
 //! crypto layer together into the WebAuthn ceremony state machine.
 
+use std::borrow::Cow;
+
 use sha2::{Digest, Sha256};
 
 use crate::attestation::ParsedAttestation;
 use crate::auth_data::AuthenticatorData;
 use crate::client_data::{self, TYPE_AUTHENTICATE, TYPE_REGISTER};
-use crate::cose::{ALG_EDDSA, ALG_ES256, CoseKey};
+use crate::cose::{ALG_EDDSA, ALG_ES256, ALG_RS256, CoseKey};
+#[cfg(feature = "pqc")]
+use crate::cose::{ALG_ML_DSA_44, ALG_ML_DSA_65, ALG_ML_DSA_87};
 use crate::crypto;
 use crate::error::{Error, Result};
 use crate::types::{
     AuthSuccess, AuthenticationChallenge, AuthenticationResponse, AuthenticationState,
     AuthenticatorSelection, Challenge, CosePublicKey, CredentialDescriptor, CredentialId,
     PasskeyCredential, PubKeyCredParam, RegistrationChallenge, RegistrationResponse,
-    RegistrationState, RpId, RpInfo, UserInfo, b64url_decode, b64url_decode_strict, now_secs,
+    RegistrationState, RpId, RpInfo, UserInfo, b64url_decode, b64url_decode_into,
+    b64url_decode_strict, now_secs,
 };
 
 const CEREMONY_TIMEOUT_MS: u32 = 60_000;
 
-/// Algorithms this crate is willing to accept on a registered credential,
-/// in MOST-preferred order (per WebAuthn §5.4.3 the RP advertises a
-/// preference; the authenticator picks one of the listed values).
+/// Longest credential ID WebAuthn-3 §7.1 step 26 accepts.
+const MAX_CREDENTIAL_ID_LEN: usize = 1023;
+
+/// Algorithms this crate accepts on a registered credential, in
+/// most-preferred order (WebAuthn-3 §5.4.3: the RP advertises a preference;
+/// the authenticator picks one of the listed values).
 ///
-/// Used in two places that must agree:
-///   1. `start_registration` advertises this list to the browser in
-///      `pubKeyCredParams`.
-///   2. `finish_registration` enforces (WebAuthn-3 §7.1 step 19) that
-///      the algorithm of the credential the authenticator actually
-///      returned is one of the advertised values. Without this check a
-///      hostile or buggy authenticator could register a key for any
-///      algorithm our COSE parser happens to support — bypassing the
-///      relying party's algorithm policy.
-const ALLOWED_REGISTRATION_ALGS: &[i64] = &[ALG_ES256, ALG_EDDSA];
+/// [`Webauthn::allowed_algs`] picks the list, and two places must agree on it:
+///   1. `start_registration` advertises it in `pubKeyCredParams`.
+///   2. `finish_registration` enforces (WebAuthn-3 §7.1 step 19) that the
+///      returned credential uses one of the advertised algorithms, so a
+///      hostile or buggy authenticator cannot register a key for any
+///      algorithm the COSE parser happens to support.
+///
+/// ES256 leads because every passkey-class authenticator implements it.
+/// EdDSA covers authenticators that prefer Ed25519, RS256 covers Windows
+/// Hello and TPM-backed keys.
+const CLASSICAL_ALGS: &[i64] = &[ALG_ES256, ALG_EDDSA, ALG_RS256];
+
+/// [`CLASSICAL_ALGS`] with ML-DSA ahead of them, used when the relying
+/// party calls [`Webauthn::allow_ml_dsa`]. Authenticators without ML-DSA
+/// pick a classical algorithm further down the list.
+#[cfg(feature = "pqc")]
+const ML_DSA_ALGS: &[i64] = &[
+    ALG_ML_DSA_44,
+    ALG_ML_DSA_65,
+    ALG_ML_DSA_87,
+    ALG_ES256,
+    ALG_EDDSA,
+    ALG_RS256,
+];
 
 /// Hard ceiling on how old a ceremony state may be when `finish_*` is
 /// called. Slightly larger than `CEREMONY_TIMEOUT_MS` (which is what
@@ -81,6 +103,8 @@ impl Attachment {
 #[derive(Debug, Clone)]
 pub struct Webauthn {
     rp_id: RpId,
+    /// SHA-256 of the RP ID, which `authenticatorData.rpIdHash` must equal.
+    rp_id_hash: [u8; 32],
     rp_name: String,
     origin: String,
     /// When `true`, finish_registration and finish_authentication
@@ -114,6 +138,10 @@ pub struct Webauthn {
     /// non-resident mode, where the user_handle may legitimately be
     /// absent.
     require_user_handle: bool,
+    /// When `true`, ML-DSA leads `pubKeyCredParams` and ML-DSA credentials
+    /// are accepted at registration.
+    #[cfg(feature = "pqc")]
+    ml_dsa: bool,
 }
 
 impl Webauthn {
@@ -146,13 +174,42 @@ impl Webauthn {
         );
         Self {
             rp_id: RpId::new(rp_id),
+            rp_id_hash: sha256_32(rp_id.as_bytes()),
+            // copy: configuration, once at startup.
             rp_name: rp_name.to_owned(),
             origin: origin.to_owned(),
             require_uv: false,
             attachment: Attachment::Platform,
             strict_base64: false,
             require_user_handle: false,
+            #[cfg(feature = "pqc")]
+            ml_dsa: false,
         }
+    }
+
+    /// Builder: when `true`, registration offers ML-DSA-44, ML-DSA-65 and
+    /// ML-DSA-87 (COSE algorithms -48, -49, -50) ahead of ES256, EdDSA and
+    /// RS256, and accepts ML-DSA credentials. Authenticators without ML-DSA
+    /// keep registering with a classical algorithm. Default `false`.
+    ///
+    /// Authentication with an ML-DSA credential works whenever the `pqc`
+    /// feature is compiled in, whatever this setting.
+    #[cfg(feature = "pqc")]
+    #[must_use]
+    pub fn allow_ml_dsa(mut self, allow: bool) -> Self {
+        self.ml_dsa = allow;
+        self
+    }
+
+    /// COSE algorithms offered in `pubKeyCredParams` and accepted at
+    /// registration, most preferred first.
+    #[must_use]
+    pub fn allowed_algs(&self) -> &'static [i64] {
+        #[cfg(feature = "pqc")]
+        if self.ml_dsa {
+            return ML_DSA_ALGS;
+        }
+        CLASSICAL_ALGS
     }
 
     /// Builder: when `true`, response-side wire fields are decoded
@@ -197,6 +254,12 @@ impl Webauthn {
 
     /// Internal: pick the right base64 decoder for response-side
     /// wire fields based on the `strict_base64` toggle.
+    /// Like [`Self::decode_b64`] into `buf`, allocating only when the value
+    /// does not fit.
+    fn decode_b64_into<'b>(&self, s: &str, buf: &'b mut [u8]) -> Result<Cow<'b, [u8]>> {
+        b64url_decode_into(s, buf, self.strict_base64)
+    }
+
     fn decode_b64(&self, s: &str) -> Result<Vec<u8>> {
         if self.strict_base64 {
             b64url_decode_strict(s)
@@ -236,6 +299,7 @@ impl Webauthn {
         self
     }
 
+    /// The relying party ID this instance verifies `rpIdHash` against.
     pub fn rp_id(&self) -> &str {
         self.rp_id.as_str()
     }
@@ -263,6 +327,8 @@ impl Webauthn {
         user_display_name: &str,
         existing: &[CredentialId],
     ) -> (RegistrationChallenge, RegistrationState) {
+        // copy: the challenge and state are owned values the caller
+        // serialises and stores; they outlive the arguments.
         let challenge = Challenge::random();
         let exclude = existing
             .iter()
@@ -286,14 +352,10 @@ impl Webauthn {
                 name: user_name.to_owned(),
                 display_name: user_display_name.to_owned(),
             },
-            // Algorithm preference, MOST-preferred first per the
-            // WebAuthn spec. ES256 leads because every passkey-class
-            // authenticator (Touch ID, Windows Hello, Android, Yubikey)
-            // implements it; EdDSA is a fallback for the small set of
-            // authenticators that prefer Ed25519 (some Yubikey 5+).
-            // Sourced from `ALLOWED_REGISTRATION_ALGS` so the advertise-
-            // and-enforce sides cannot drift.
-            pub_key_cred_params: ALLOWED_REGISTRATION_ALGS
+            // Sourced from `allowed_algs` so the advertise and enforce
+            // sides cannot drift.
+            pub_key_cred_params: self
+                .allowed_algs()
                 .iter()
                 .map(|&alg| PubKeyCredParam {
                     kind: "public-key",
@@ -331,8 +393,10 @@ impl Webauthn {
         check_not_expired(state.created_at)?;
 
         // 1. Validate clientDataJSON.
+        let mut cdj_buf = [0u8; 1024];
         let cdj_raw = client_data::validate(
             &response.client_data_json,
+            &mut cdj_buf,
             TYPE_REGISTER,
             &state.challenge,
             &self.origin,
@@ -341,6 +405,8 @@ impl Webauthn {
         let cdj_hash = sha256_32(&cdj_raw);
 
         // 2. Parse the attestation object.
+        // The attestationObject has no size bound (x5c chains, ML-DSA keys),
+        // so it decodes into a heap buffer; everything parsed from it borrows.
         let att_bytes = self.decode_b64(&response.attestation_object)?;
         let att = ParsedAttestation::parse(&att_bytes)?;
 
@@ -348,8 +414,7 @@ impl Webauthn {
         // because both sides are public (SHA-256 of the RP ID) and an
         // attacker who could probe timing learns only the RP ID, which
         // they already know from the same TLS handshake.
-        let want_rp_hash = sha256_32(self.rp_id.as_str().as_bytes());
-        if att.auth_data.rp_id_hash != want_rp_hash {
+        if *att.auth_data.rp_id_hash != self.rp_id_hash {
             return Err(Error::RpIdHashMismatch);
         }
 
@@ -362,6 +427,9 @@ impl Webauthn {
         if self.require_uv && !att.auth_data.user_verified() {
             return Err(Error::UserNotVerified);
         }
+        // WebAuthn-3 §7.1 step 17: BS (backed up) without BE (backup
+        // eligible) is an invalid combination.
+        att.auth_data.check_backup_flags()?;
 
         // 5. AT flag MUST be set on registration; we need the attested
         // credential data to extract the public key.
@@ -373,28 +441,28 @@ impl Webauthn {
 
         // 6. Parse the COSE public key and verify any attestation
         // statement signed by it.
-        let cose = CoseKey::parse(attested.public_key_cose.as_bytes())?;
+        let cose = CoseKey::parse(attested.public_key_cose)?;
 
         // 6a. WebAuthn §7.1 step 19: the credential's alg MUST be one of
         // the algorithms the RP advertised in pubKeyCredParams. Without
         // this check a hostile or buggy authenticator could register a
         // key for any algorithm our COSE parser supports, bypassing the
-        // RP's algorithm policy. We source the allowed list from the
-        // same const start_registration used to build the challenge, so
-        // the advertise side and the enforce side cannot drift.
-        if !ALLOWED_REGISTRATION_ALGS.contains(&cose.alg()) {
+        // RP's algorithm policy. `allowed_algs` also built the challenge,
+        // so the advertise side and the enforce side cannot drift.
+        if !self.allowed_algs().contains(&cose.alg()) {
             return Err(Error::UnsupportedAlg(cose.alg()));
         }
 
         att.verify_statement(&cose, &cdj_hash)?;
 
         // 7. Build the persisted credential.
+        // copy: the credential is returned to the caller to store.
         Ok(PasskeyCredential {
-            id: attested.credential_id.clone(),
-            public_key_cose: CosePublicKey(attested.public_key_cose.as_bytes().to_vec()),
+            id: CredentialId(attested.credential_id.to_vec()),
+            public_key_cose: CosePublicKey(attested.public_key_cose.to_vec()),
             counter: att.auth_data.sign_count,
             transports: response.transports.clone(),
-            aaguid: attested.aaguid,
+            aaguid: *attested.aaguid,
         })
     }
 
@@ -424,7 +492,8 @@ impl Webauthn {
                 transports: Vec::new(),
             })
             .collect();
-        self.build_auth_challenge(allow_credentials, descriptors)
+        // copy: the state outlives the caller's slice.
+        self.build_auth_challenge(allow_credentials.to_vec(), descriptors)
     }
 
     /// Like [`Self::start_authentication`] but pulls the `transports`
@@ -444,15 +513,16 @@ impl Webauthn {
                 transports: c.transports.clone(),
             })
             .collect();
-        let ids: Vec<CredentialId> = allow_credentials.iter().map(|c| c.id.clone()).collect();
-        self.build_auth_challenge(&ids, descriptors)
+        // copy: the state outlives the caller's credentials.
+        let ids = allow_credentials.iter().map(|c| c.id.clone()).collect();
+        self.build_auth_challenge(ids, descriptors)
     }
 
     /// Internal: assemble the challenge JSON + state from already-built
     /// descriptors. Shared by both `start_authentication*` entry points.
     fn build_auth_challenge(
         &self,
-        ids: &[CredentialId],
+        ids: Vec<CredentialId>,
         descriptors: Vec<CredentialDescriptor>,
     ) -> (AuthenticationChallenge, AuthenticationState) {
         let challenge = Challenge::random();
@@ -465,7 +535,7 @@ impl Webauthn {
         };
         let state = AuthenticationState {
             challenge,
-            allow_credentials: ids.to_vec(),
+            allow_credentials: ids,
             created_at: now_secs(),
             // Set by start_authentication_for_user only; the simple
             // entry points leave it None so finish_authentication
@@ -497,16 +567,8 @@ impl Webauthn {
         user_handle: &[u8],
         allow_credentials: &[CredentialId],
     ) -> (AuthenticationChallenge, AuthenticationState) {
-        let descriptors = allow_credentials
-            .iter()
-            .map(|c| CredentialDescriptor {
-                kind: "public-key",
-                id: c.to_b64url(),
-                transports: Vec::new(),
-            })
-            .collect();
-        let (chal, mut state) = self.build_auth_challenge(allow_credentials, descriptors);
-        state.user_handle = Some(user_handle.to_vec());
+        let (chal, mut state) = self.start_authentication(allow_credentials);
+        state.user_handle = Some(user_handle.to_vec()); // copy: stored in the state
         (chal, state)
     }
 
@@ -519,17 +581,8 @@ impl Webauthn {
         user_handle: &[u8],
         allow_credentials: &[PasskeyCredential],
     ) -> (AuthenticationChallenge, AuthenticationState) {
-        let descriptors = allow_credentials
-            .iter()
-            .map(|c| CredentialDescriptor {
-                kind: "public-key",
-                id: c.id.to_b64url(),
-                transports: c.transports.clone(),
-            })
-            .collect();
-        let ids: Vec<CredentialId> = allow_credentials.iter().map(|c| c.id.clone()).collect();
-        let (chal, mut state) = self.build_auth_challenge(&ids, descriptors);
-        state.user_handle = Some(user_handle.to_vec());
+        let (chal, mut state) = self.start_authentication_with_creds(allow_credentials);
+        state.user_handle = Some(user_handle.to_vec()); // copy: stored in the state
         (chal, state)
     }
 
@@ -566,13 +619,17 @@ impl Webauthn {
         // 1. The asserted credential ID must be one of the ones we
         // told the browser was acceptable (if we gave a non-empty
         // allow list), and it must be the stored one.
-        let asserted_id = CredentialId(self.decode_b64(&response.id)?);
+        let mut id_buf = [0u8; MAX_CREDENTIAL_ID_LEN];
+        let asserted_id = self.decode_b64_into(&response.id, &mut id_buf)?;
         if !state.allow_credentials.is_empty()
-            && !state.allow_credentials.iter().any(|c| c == &asserted_id)
+            && !state
+                .allow_credentials
+                .iter()
+                .any(|c| c.as_bytes() == &*asserted_id)
         {
             return Err(Error::BadSignature);
         }
-        if asserted_id != stored.id {
+        if stored.id.as_bytes() != &*asserted_id {
             return Err(Error::BadSignature);
         }
 
@@ -591,11 +648,23 @@ impl Webauthn {
         // When state.user_handle = None (the ceremony was started via
         // start_authentication{,_with_creds}) the check is skipped
         // entirely — the caller has no expected value to compare.
+        //
+        // A ceremony with an empty allow list and no expected user is a
+        // discoverable-credential flow: the caller identifies the user by
+        // `userHandle`, so WebAuthn-3 §7.2 step 6 requires it to be present.
+        if state.allow_credentials.is_empty()
+            && state.user_handle.is_none()
+            && response.user_handle.is_none()
+        {
+            return Err(Error::UserHandleMismatch);
+        }
         if let Some(expected) = &state.user_handle {
             match response.user_handle.as_deref() {
                 Some(got_b64) => {
-                    let got = self.decode_b64(got_b64)?;
-                    if &got != expected {
+                    // User handles are at most 64 bytes; base64 decoding needs
+                    // room for its length estimate on top.
+                    let mut buf = [0u8; 96];
+                    if *self.decode_b64_into(got_b64, &mut buf)? != **expected {
                         return Err(Error::UserHandleMismatch);
                     }
                 }
@@ -607,8 +676,10 @@ impl Webauthn {
         }
 
         // 2. Validate clientDataJSON.
+        let mut cdj_buf = [0u8; 1024];
         let cdj_raw = client_data::validate(
             &response.client_data_json,
+            &mut cdj_buf,
             TYPE_AUTHENTICATE,
             &state.challenge,
             &self.origin,
@@ -617,10 +688,10 @@ impl Webauthn {
         let cdj_hash = sha256_32(&cdj_raw);
 
         // 3. Parse + check authenticator data.
-        let ad_bytes = self.decode_b64(&response.authenticator_data)?;
+        let mut ad_buf = [0u8; 1024];
+        let ad_bytes = self.decode_b64_into(&response.authenticator_data, &mut ad_buf)?;
         let ad = AuthenticatorData::parse(&ad_bytes)?;
-        let want_rp_hash = sha256_32(self.rp_id.as_str().as_bytes());
-        if ad.rp_id_hash != want_rp_hash {
+        if *ad.rp_id_hash != self.rp_id_hash {
             return Err(Error::RpIdHashMismatch);
         }
         if !ad.user_present() {
@@ -629,14 +700,15 @@ impl Webauthn {
         if self.require_uv && !ad.user_verified() {
             return Err(Error::UserNotVerified);
         }
+        // WebAuthn-3 §7.2 step 16.
+        ad.check_backup_flags()?;
 
         // 4. Verify the signature: signedMsg = authData || cdjHash.
         let key = CoseKey::parse(stored.public_key_cose.as_bytes())?;
-        let sig = self.decode_b64(&response.signature)?;
-        let mut msg = Vec::with_capacity(ad_bytes.len() + 32);
-        msg.extend_from_slice(&ad_bytes);
-        msg.extend_from_slice(&cdj_hash);
-        crypto::verify(&key, &msg, &sig)?;
+        // Large enough for every signature but ML-DSA-65/87, which allocate.
+        let mut sig_buf = [0u8; 2560];
+        let sig = self.decode_b64_into(&response.signature, &mut sig_buf)?;
+        crypto::verify(&key, &[&ad_bytes, &cdj_hash], &sig)?;
 
         // 5. Counter check. Per the spec: if BOTH signCount and the
         // stored counter are 0, the credential never increments -
@@ -652,7 +724,8 @@ impl Webauthn {
         }
 
         Ok(AuthSuccess {
-            credential_id: asserted_id,
+            credential_id: stored.id.clone(), // copy: returned to the caller
+
             new_counter: ad.sign_count,
             user_verified: ad.user_verified(),
         })
@@ -712,7 +785,8 @@ mod tests {
         let wa = Webauthn::new("example.com", "Example", "https://example.com");
         let (chal, _) = wa.start_registration(b"u", "u", "U", &[]);
         let advertised: Vec<i64> = chal.pub_key_cred_params.iter().map(|p| p.alg).collect();
-        assert_eq!(advertised, ALLOWED_REGISTRATION_ALGS);
+        assert_eq!(advertised, wa.allowed_algs());
+        assert_eq!(advertised, [ALG_ES256, ALG_EDDSA, ALG_RS256]);
     }
 
     #[test]

@@ -4,7 +4,7 @@
 [![Crates.io](https://img.shields.io/crates/v/passkey-auth.svg)](https://crates.io/crates/passkey-auth)
 [![docs.rs](https://img.shields.io/docsrs/passkey-auth)](https://docs.rs/passkey-auth)
 [![License](https://img.shields.io/crates/l/passkey-auth.svg)](#license)
-[![MSRV](https://img.shields.io/badge/MSRV-1.85-blue.svg)](https://blog.rust-lang.org/)
+[![MSRV](https://img.shields.io/badge/MSRV-1.89-blue.svg)](https://blog.rust-lang.org/)
 [![Dependencies](https://deps.rs/repo/github/marirs/passkey-auth/status.svg)](https://deps.rs/repo/github/marirs/passkey-auth)
 
 Pure-Rust WebAuthn server library focused on the passkey ceremony.
@@ -16,10 +16,17 @@ hardware keys).
 
 ```toml
 [dependencies]
-passkey-auth = "0.1"
+passkey-auth = "0.2"
 ```
 
-MSRV: **Rust 1.85** (edition 2024).
+With ML-DSA (post-quantum) credentials:
+
+```toml
+[dependencies]
+passkey-auth = { version = "0.2", features = ["pqc"] }
+```
+
+MSRV: **Rust 1.89** (edition 2024).
 
 ## Why this exists
 
@@ -31,23 +38,34 @@ rustcrypto end-to-end:
 |------------------------|----------------------------------------------------------------|--------------------------|
 | ECDSA P-256 verify     | [`p256`](https://crates.io/crates/p256)                        | openssl                  |
 | Ed25519 verify         | [`ed25519-dalek`](https://crates.io/crates/ed25519-dalek)      | openssl                  |
+| RSA PKCS#1 v1.5 verify | [`rsa`](https://crates.io/crates/rsa) (public-key operations)  | openssl                  |
+| ML-DSA verify          | [`ml-dsa`](https://crates.io/crates/ml-dsa) (`pqc` feature)    | not supported            |
 | SHA-256                | [`sha2`](https://crates.io/crates/sha2)                        | openssl                  |
-| CBOR                   | [`ciborium`](https://crates.io/crates/ciborium)                | serde_cbor (deprecated)  |
+| CBOR                   | built-in borrowing decoder                                     | serde_cbor (deprecated)  |
 | Attestation chain      | x5c sig verified, root NOT validated                           | full X.509 + FIDO MDS    |
 
 ## Scope
 
 - Registration ceremony (parse `AuthenticatorAttestationResponse`, verify origin/challenge, extract public key)
 - Authentication ceremony (parse `AuthenticatorAssertionResponse`, verify signature)
-- Algorithms: **ES256** (COSE alg -7, P-256 ECDSA) and **EdDSA** (-8, Ed25519); the credential's alg is enforced at registration against the advertised `pubKeyCredParams` (WebAuthn-3 §7.1 step 19)
+- Algorithms, in the order `pubKeyCredParams` offers them:
+  - **ML-DSA-44, ML-DSA-65, ML-DSA-87** (COSE alg -48, -49, -50; FIPS 204, AKP keys per RFC 9964) with the `pqc` feature and `.allow_ml_dsa(true)`
+  - **ES256** (-7, P-256 ECDSA)
+  - **EdDSA** (-8, Ed25519)
+  - **RS256** (-257, RSASSA-PKCS1-v1_5 with SHA-256; Windows Hello and TPM keys). Moduli outside 2048-4096 bits and public exponents that are even, below 3 or above 2^32 - 1 are refused.
+
+  The credential's alg is enforced at registration against the advertised list (WebAuthn-3 §7.1 step 19); `Webauthn::allowed_algs` returns it.
 - Attestation formats:
   - `none` (fully)
-  - `packed` self-attestation (no cert chain)
-  - `packed` with `x5c` cert chain (cert sig verified; chain NOT validated to a root)
-  - `fido-u2f` (legacy Yubikeys; cert sig verified, chain NOT validated)
+  - `packed` self-attestation (no cert chain), for every algorithm above
+  - `packed` with `x5c` cert chain, ES256 (P-256 cert) or RS256 (RSA cert): cert sig and the WebAuthn-3 §8.2.1 certificate requirements verified; chain NOT validated to a root
+  - `fido-u2f` (legacy Yubikeys; exactly one P-256 cert; cert sig verified, chain NOT validated)
 - Replay protection via the authenticator counter
+- Backup flags: BS (backed up) without BE (backup eligible) is refused in both ceremonies
+- Ceremonies run in a cross-origin iframe (`crossOrigin: true` or a `topOrigin`) are refused
 - Opt-in **user-verification enforcement** for production passkey deployments (`.require_user_verification(true)`)
 - Opt-in **user-handle enforcement** for username-first flows (`start_authentication_for_user` + `.require_user_handle(true)`) — verifies the assertion's `userHandle` matches the expected user (WebAuthn-3 §7.2 step 6)
+- Discoverable (usernameless) flows require the assertion's `userHandle` (WebAuthn-3 §7.2 step 6)
 - Configurable **authenticator attachment** (platform / cross-platform / any) — see [`Attachment`](https://docs.rs/passkey-auth/latest/passkey_auth/enum.Attachment.html)
 - Base64 decoding: lenient by default (accepts url-safe / standard / padded / unpadded inputs); flip `.strict_base64(true)` to require spec-compliant url-safe-no-pad
 
@@ -60,8 +78,8 @@ Not in scope:
   these specific authenticator models" enterprise policy, you need
   full MDS — this crate is not the right pick.
 - Conditional UI / discoverable credentials beyond what the server needs to know
-- RSA / RS256 (rare for passkeys; reject with a clear error)
 - TPM / Android-Key / Android-SafetyNet / Apple attestation formats
+- Cross-origin iframe ceremonies and multiple origins per relying party
 
 ## Usage
 
@@ -114,6 +132,35 @@ let outcome = wa.finish_authentication(&state, &response, &credential)?;
 // Update stored counter: credential.counter = outcome.new_counter
 ```
 
+### Post-quantum credentials (`pqc` feature)
+
+The `pqc` feature adds ML-DSA (FIPS 204) verification through the
+RustCrypto [`ml-dsa`](https://crates.io/crates/ml-dsa) crate. The
+relying party then opts in at runtime:
+
+```rust,ignore
+let wa = Webauthn::new("example.com", "Example", "https://example.com")
+    .allow_ml_dsa(true);
+// pubKeyCredParams: ML-DSA-44, ML-DSA-65, ML-DSA-87, ES256, EdDSA, RS256
+```
+
+Authenticators that implement ML-DSA register an ML-DSA credential;
+all others pick ES256, EdDSA or RS256 further down the list, so no
+user is locked out. Signatures use the pure ML-DSA mode with an empty
+context string, as RFC 9964 requires. A build with the `pqc` feature
+verifies ML-DSA credentials at sign-in whether or not `allow_ml_dsa`
+is set; without the feature they fail with `Error::UnsupportedAlg`.
+
+Without the feature the crate verifies ES256, EdDSA and RS256 only and
+does not compile `ml-dsa`.
+
+### Stored credentials
+
+`PasskeyCredential` serialises to the same JSON in 0.2 as in 0.1, and
+credentials stored by 0.1.3 deserialise and verify unchanged
+(`tests/compat_0_1_3.rs` checks this against credentials produced by
+the published 0.1.3 crate).
+
 ### RP ID parsing from URLs
 
 `Webauthn::new` takes the bare domain (no scheme, no port). If the
@@ -163,11 +210,11 @@ browser (Touch ID, Windows Hello, iCloud Keychain, Yubikey, etc.).
 
 | Example | Framework | What it shows |
 |---|---|---|
-| [`axum_server`](examples/axum_server.rs) | Axum 0.7 | Minimal single-user register + authenticate |
+| [`axum_server`](examples/axum_server.rs) | Axum 0.8 | Minimal single-user register + authenticate |
 | [`rocket_server`](examples/rocket_server.rs) | Rocket 0.5 | Same as above, Rocket variant |
-| [`axum_passwordless`](examples/axum_passwordless.rs) | Axum 0.7 | **Multi-user** with **usernameless** sign-in (Gmail-style "tap to sign in", discoverable credentials, browser shows account picker) |
+| [`axum_passwordless`](examples/axum_passwordless.rs) | Axum 0.8 | **Multi-user** with **usernameless** sign-in (Gmail-style "tap to sign in", discoverable credentials, browser shows account picker) |
 | [`rocket_credential_manager`](examples/rocket_credential_manager.rs) | Rocket 0.5 | **Multiple devices per user**: register additional passkeys while signed in, list them, remove individual ones (refuses to remove the last) |
-| [`axum_sqlite`](examples/axum_sqlite.rs) | Axum 0.7 + rusqlite | **Persistent storage**: same as `axum_server` but credentials survive process restart in `passkeys.db` |
+| [`axum_sqlite`](examples/axum_sqlite.rs) | Axum 0.8 + rusqlite | **Persistent storage**: same as `axum_server` but credentials survive process restart in `passkeys.db` |
 
 ```bash
 cargo run --example axum_server                # start here
@@ -184,10 +231,46 @@ wiring the crate into your own server, not as copy-paste starters.
 ## Testing
 
 ```bash
-cargo test            # unit + integration + doc-tests
-cargo clippy --all-targets -- -D warnings
+cargo test                      # unit, integration and doc tests
+cargo test --all-features       # the same with ML-DSA
+cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 ```
+
+The integration tests cover every algorithm and backup-flag combination
+(`tests/conformance.rs`), responses recorded from real authenticators
+(`tests/interop.rs`, from the py_webauthn test suite), and credentials
+stored by 0.1.3 (`tests/compat_0_1_3.rs`). The RS256 and ML-DSA verify
+calls also run the C2SP Wycheproof RSASSA-PKCS1-v1_5 vectors and the
+NIST ACVP ML-DSA sigVer vectors.
+
+### Benchmarks
+
+```bash
+cargo bench --bench verify --features pqc               # finish_registration / finish_authentication per algorithm
+cargo bench --bench parsers --features __internals      # CBOR, authenticator data, COSE_Key, clientDataJSON
+cargo test --all-features --test alloc_count -- --nocapture   # heap allocations per verify path
+```
+
+The `__internals` feature exposes the parsers to the benchmarks and the
+fuzz targets. It is not part of the public API.
+
+### Fuzzing
+
+`fuzz/` holds [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz)
+targets for every parser that reads client input: `attestation_object`
+(CBOR envelope, authenticator data, COSE_Key and the attestation
+statement with its certificates), `cose_key`, `authenticator_data`,
+`client_data_json` and `attestation_cert`. `fuzz/seeds/` holds the seed
+corpora: real authenticator output and synthetic output for every
+algorithm and attestation format. Fuzzing needs a nightly toolchain:
+
+```bash
+cargo install cargo-fuzz
+cargo +nightly fuzz run attestation_object fuzz/corpus/attestation_object fuzz/seeds/attestation_object -- -max_total_time=600
+```
+
+Every parser returns an error, never panics, on any input.
 
 CI exercises Linux x86_64 + aarch64, macOS Apple Silicon, and
 Windows x86_64 on every push.

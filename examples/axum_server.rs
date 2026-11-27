@@ -262,9 +262,9 @@ fn json_with_sid<T: Serialize>(body: &T, sid: &str) -> Response {
 }
 
 fn rand_bytes(n: usize) -> Vec<u8> {
-    use rand::RngCore;
+    use rand::Rng as _;
     let mut buf = vec![0u8; n];
-    rand::thread_rng().fill_bytes(&mut buf);
+    rand::rng().fill_bytes(&mut buf);
     buf
 }
 

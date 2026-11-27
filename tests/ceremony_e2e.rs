@@ -50,7 +50,7 @@ const FLAG_AT: u8 = 1 << 6;
 impl FakeAuthenticator {
     fn new() -> Self {
         let mut seed = [0u8; 32];
-        rand::Rng::fill(&mut rand::thread_rng(), &mut seed);
+        rand::Rng::fill_bytes(&mut rand::rng(), &mut seed);
         Self {
             sk: SigningKey::from_bytes(&seed),
             credential_id: b"test-credential-0001".to_vec(),
@@ -213,7 +213,7 @@ fn counter_replay_rejected() {
     let credential = do_register(&wa, &mut auth);
 
     // Pretend the user already authenticated up to counter=5.
-    let mut stored = credential.clone();
+    let mut stored = credential;
     stored.counter = 5;
 
     // Authenticator (somehow) emits counter=5 - equal, not strictly greater.
