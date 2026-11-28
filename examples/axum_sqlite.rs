@@ -6,15 +6,17 @@
 //!
 //! Then open http://localhost:3000. Register a passkey, kill the
 //! server, run it again - the passkey is still there.
+//! A `passkeys.db` written by the 0.2 version of this example has no
+//! backup flag columns; delete it before running this one.
 //!
 //! What this example demonstrates:
 //!
 //! - How to persist `PasskeyCredential` to a SQL row. The mapping is
 //!   straightforward: every field is either bytes, an int, or a
 //!   small list-of-strings that we comma-join.
-//! - How to update the counter inside `finish_authentication` BEFORE
-//!   returning success. The DB is the source of truth; the in-memory
-//!   copy is a cache.
+//! - How to update the counter and backup flags after
+//!   `finish_authentication`, BEFORE returning success. The DB is the
+//!   source of truth; the in-memory copy is a cache.
 //! - Why challenge / session state is NOT in the DB: challenges are
 //!   single-use and last ~60 seconds. Putting them in SQLite means
 //!   you also need a cleanup job. In-memory + cookie sid is simpler.
@@ -42,8 +44,8 @@ use tokio::sync::Mutex;
 use tower_http::services::ServeDir;
 
 use passkey_auth::{
-    Attachment, AuthenticationResponse, AuthenticationState, CosePublicKey, CredentialId,
-    PasskeyCredential, RegistrationResponse, RegistrationState, Webauthn,
+    Attachment, AuthSuccess, AuthenticationResponse, AuthenticationState, CosePublicKey,
+    CredentialId, PasskeyCredential, RegistrationResponse, RegistrationState, Webauthn,
 };
 
 const DB_PATH: &str = "passkeys.db";
@@ -54,7 +56,8 @@ const USERNAME: &str = "alice@example.com";
 /// The schema. One table per concept:
 ///   users      - (id BLOB PRIMARY KEY, username TEXT UNIQUE NOT NULL)
 ///   credentials - (id BLOB PK, user_id BLOB FK, public_key_cose BLOB,
-///                  counter INTEGER, transports TEXT, aaguid BLOB)
+///                  counter INTEGER, transports TEXT, aaguid BLOB,
+///                  backup_eligible INTEGER, backup_state INTEGER)
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS users (
     id        BLOB PRIMARY KEY,
@@ -71,6 +74,9 @@ CREATE TABLE IF NOT EXISTS credentials (
     -- the row_to_credential reader does not need to guess what a
     -- short value means.
     aaguid          BLOB NOT NULL CHECK (length(aaguid) = 16),
+    -- BE and BS flags (0 or 1); NULL means unknown.
+    backup_eligible INTEGER,
+    backup_state    INTEGER,
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
 "#;
@@ -113,8 +119,9 @@ impl Store {
 
     fn insert_credential(&self, user_id: &[u8], cred: &PasskeyCredential) -> rusqlite::Result<()> {
         self.conn.execute(
-            "INSERT INTO credentials (id, user_id, public_key_cose, counter, transports, aaguid)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO credentials (id, user_id, public_key_cose, counter, transports, aaguid,
+                                      backup_eligible, backup_state)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 cred.id.as_bytes(),
                 user_id,
@@ -122,6 +129,8 @@ impl Store {
                 cred.counter,
                 cred.transports.join(","),
                 cred.aaguid,
+                cred.backup_eligible,
+                cred.backup_state,
             ],
         )?;
         Ok(())
@@ -129,7 +138,7 @@ impl Store {
 
     fn list_credentials(&self, user_id: &[u8]) -> rusqlite::Result<Vec<PasskeyCredential>> {
         let mut q = self.conn.prepare(
-            "SELECT id, public_key_cose, counter, transports, aaguid
+            "SELECT id, public_key_cose, counter, transports, aaguid, backup_eligible, backup_state
              FROM credentials WHERE user_id = ?1",
         )?;
         let creds = q
@@ -140,7 +149,7 @@ impl Store {
 
     fn find_credential(&self, cred_id: &[u8]) -> rusqlite::Result<Option<PasskeyCredential>> {
         let mut q = self.conn.prepare(
-            "SELECT id, public_key_cose, counter, transports, aaguid
+            "SELECT id, public_key_cose, counter, transports, aaguid, backup_eligible, backup_state
              FROM credentials WHERE id = ?1",
         )?;
         let mut rows = q.query(params![cred_id])?;
@@ -150,10 +159,16 @@ impl Store {
         Ok(None)
     }
 
-    fn update_counter(&self, cred_id: &[u8], counter: u32) -> rusqlite::Result<()> {
+    fn update_after_authentication(&self, outcome: &AuthSuccess) -> rusqlite::Result<()> {
         self.conn.execute(
-            "UPDATE credentials SET counter = ?1 WHERE id = ?2",
-            params![counter, cred_id],
+            "UPDATE credentials SET counter = ?1, backup_eligible = ?2, backup_state = ?3
+             WHERE id = ?4",
+            params![
+                outcome.new_counter,
+                outcome.backup_eligible,
+                outcome.backup_state,
+                outcome.credential_id.as_bytes(),
+            ],
         )?;
         Ok(())
     }
@@ -186,17 +201,14 @@ fn row_to_credential(row: &rusqlite::Row<'_>) -> rusqlite::Result<PasskeyCredent
     let mut aaguid = [0u8; 16];
     aaguid.copy_from_slice(&aaguid_vec);
 
-    Ok(PasskeyCredential {
-        id: CredentialId(id),
-        public_key_cose: CosePublicKey(pkc),
-        counter,
-        transports: if transports_csv.is_empty() {
-            Vec::new()
-        } else {
-            transports_csv.split(',').map(|s| s.to_owned()).collect()
-        },
-        aaguid,
-    })
+    let mut credential = PasskeyCredential::new(CredentialId(id), CosePublicKey(pkc), counter);
+    if !transports_csv.is_empty() {
+        credential.transports = transports_csv.split(',').map(|s| s.to_owned()).collect();
+    }
+    credential.aaguid = aaguid;
+    credential.backup_eligible = row.get(5)?;
+    credential.backup_state = row.get(6)?;
+    Ok(credential)
 }
 
 // ---------- in-memory ceremony state --------------------------------------
@@ -345,11 +357,12 @@ async fn authenticate_finish(
         .finish_authentication(&auth_state, &body, &stored)
         .map_err(|e| AppError::Unauthorized(format!("auth verify failed: {e}")))?;
 
-    // Persist the new counter. Important: do this BEFORE replying so a
-    // crash between verify and reply still leaves the counter advanced;
-    // the next assertion will be rejected as replay rather than reused.
+    // Persist the new counter and backup flags. Important: do this BEFORE
+    // replying so a crash between verify and reply still leaves the
+    // counter advanced; the next assertion will be rejected as replay
+    // rather than reused.
     store
-        .update_counter(stored.id.as_bytes(), outcome.new_counter)
+        .update_after_authentication(&outcome)
         .map_err(db_err)?;
     stored.counter = outcome.new_counter;
 

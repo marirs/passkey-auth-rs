@@ -1,6 +1,7 @@
 //! Parser entry points for the fuzz targets in `fuzz/` and the parser
-//! benchmarks in `benches/`. Enabled by the `__internals` feature. Not
-//! part of the public API: names and signatures change without notice.
+//! benchmarks in `benches/`. Compiled only with `--cfg fuzzing`, which
+//! cargo-fuzz sets; no Cargo feature reaches it. Not part of the public
+//! API: names and signatures change without notice.
 
 use crate::attestation::ParsedAttestation;
 use crate::auth_data::AuthenticatorData;

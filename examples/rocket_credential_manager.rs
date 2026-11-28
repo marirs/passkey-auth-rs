@@ -191,6 +191,8 @@ fn authenticate_finish(
         .finish_authentication(&auth_state, &body, stored)
         .map_err(|e| Custom(Status::Unauthorized, format!("auth verify failed: {e}")))?;
     stored.counter = outcome.new_counter;
+    stored.backup_eligible = Some(outcome.backup_eligible);
+    stored.backup_state = Some(outcome.backup_state);
     drop(user);
 
     // Rotate: drop the old session entry, create a new signed-in

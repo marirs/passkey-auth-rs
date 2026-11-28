@@ -8,7 +8,10 @@
 use thiserror::Error;
 
 #[derive(Error, Debug)]
+#[non_exhaustive]
 /// Why a registration or authentication ceremony failed.
+///
+/// The enum is `#[non_exhaustive]`: a `match` on it needs a `_` arm.
 pub enum Error {
     /// Invalid base64url encoding on a wire field (challenge, credential
     /// id, signature, etc.).
@@ -83,6 +86,18 @@ pub enum Error {
         stored: u32,
         /// Counter in this assertion.
         new: u32,
+    },
+
+    /// The assertion's BE (backup eligible) flag differs from the one
+    /// stored with the credential (WebAuthn-3 §7.2 step 17). BE is fixed
+    /// when the credential is created, so the caller should treat this
+    /// like [`Error::CounterReplay`] and reject.
+    #[error("backup eligibility changed (stored={stored}, new={new})")]
+    BackupEligibilityChanged {
+        /// BE stored with the credential.
+        stored: bool,
+        /// BE in this assertion.
+        new: bool,
     },
 
     /// The ceremony state handed to `finish_*` is older than the

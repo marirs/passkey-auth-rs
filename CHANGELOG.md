@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.3.0 - 2026-11-28
+
+### Upgrading from 0.2
+
+- Change the dependency to `passkey-auth = "0.3"`.
+- Stored credentials keep working. `PasskeyCredential` JSON written by
+  0.1.x and 0.2.0 deserialises and verifies unchanged, with both backup
+  flags unknown, and serialises back to the same bytes.
+- After each sign-in, store `AuthSuccess::backup_eligible` and
+  `AuthSuccess::backup_state` with the credential, as
+  `Some(..)`, next to `new_counter`. `AuthSuccess` JSON carries the two
+  flags and needs them to deserialise.
+- `PasskeyCredential` can no longer be built with a struct literal; use
+  `PasskeyCredential::new(id, public_key_cose, counter)` and set the
+  other public fields.
+- A `match` on `Error` needs a `_` arm.
+- The `__internals` feature is gone. Fuzzing with cargo-fuzz works as
+  before; the parser benchmark runs with
+  `RUSTFLAGS="--cfg fuzzing" cargo bench --bench parsers`.
+
+### Added
+
+- `PasskeyCredential::backup_eligible` and
+  `PasskeyCredential::backup_state` (`Option<bool>`) hold the BE and BS
+  flags. `finish_registration` sets them from the attestation's
+  authenticator data; `None` means unknown, which is what credentials
+  stored by 0.1.x and 0.2.0 load as.
+- `AuthSuccess::backup_eligible` and `AuthSuccess::backup_state` report
+  the assertion's BE and BS flags.
+- `Error::BackupEligibilityChanged { stored, new }`: an assertion whose
+  BE differs from the stored BE is refused (WebAuthn-3 §7.2 step 17). A
+  credential with unknown BE accepts either value and adopts the one
+  `AuthSuccess` returns. BS may change between assertions.
+- `PasskeyCredential::new(id, public_key_cose, counter)` builds a
+  credential from stored parts, with no transports, an all-zero AAGUID
+  and unknown backup flags.
+- The crate root re-exports `AuthenticatorSelection`,
+  `CredentialDescriptor`, `PubKeyCredParam`, `RpInfo` and `UserInfo`,
+  the types of public fields of `RegistrationChallenge` and
+  `AuthenticationChallenge` that could not be named before.
+
+### Changed
+
+- `Error`, `PasskeyCredential`, `AuthSuccess`, `RegistrationChallenge`,
+  `AuthenticationChallenge` and `AuthenticatorSelection` are
+  `#[non_exhaustive]`.
+- The parser entry points used by the fuzz targets and the parser
+  benchmark compile only under `cfg(fuzzing)`, which cargo-fuzz sets,
+  instead of behind the public `__internals` feature.
+
 ## 0.2.0 - 2026-11-27
 
 ### Upgrading from 0.1

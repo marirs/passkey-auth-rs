@@ -213,8 +213,10 @@ async fn authenticate_finish(
         .finish_authentication(&auth_state, &body, stored)
         .map_err(|e| AppError::Unauthorized(format!("auth verify failed: {e}")))?;
 
-    // Update the stored counter (per the spec).
+    // Update the stored counter and backup flags (per the spec).
     stored.counter = outcome.new_counter;
+    stored.backup_eligible = Some(outcome.backup_eligible);
+    stored.backup_state = Some(outcome.backup_state);
 
     Ok(Json(AuthFinishReply {
         ok: true,

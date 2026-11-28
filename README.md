@@ -16,14 +16,14 @@ hardware keys).
 
 ```toml
 [dependencies]
-passkey-auth = "0.2"
+passkey-auth = "0.3"
 ```
 
 With ML-DSA (post-quantum) credentials:
 
 ```toml
 [dependencies]
-passkey-auth = { version = "0.2", features = ["pqc"] }
+passkey-auth = { version = "0.3", features = ["pqc"] }
 ```
 
 MSRV: **Rust 1.89** (edition 2024).
@@ -61,7 +61,7 @@ rustcrypto end-to-end:
   - `packed` with `x5c` cert chain, ES256 (P-256 cert) or RS256 (RSA cert): cert sig and the WebAuthn-3 §8.2.1 certificate requirements verified; chain NOT validated to a root
   - `fido-u2f` (legacy Yubikeys; exactly one P-256 cert; cert sig verified, chain NOT validated)
 - Replay protection via the authenticator counter
-- Backup flags: BS (backed up) without BE (backup eligible) is refused in both ceremonies
+- Backup flags: BS (backed up) without BE (backup eligible) is refused in both ceremonies. The credential stores BE and BS; an assertion whose BE differs from the stored BE is refused (WebAuthn-3 §7.2 step 17), and the new BS is returned for the caller to store
 - Ceremonies run in a cross-origin iframe (`crossOrigin: true` or a `topOrigin`) are refused
 - Opt-in **user-verification enforcement** for production passkey deployments (`.require_user_verification(true)`)
 - Opt-in **user-handle enforcement** for username-first flows (`start_authentication_for_user` + `.require_user_handle(true)`) — verifies the assertion's `userHandle` matches the expected user (WebAuthn-3 §7.2 step 6)
@@ -111,7 +111,8 @@ let response: RegistrationResponse = todo!();
 
 let credential: PasskeyCredential = wa.finish_registration(&state, &response)?;
 // Persist: credential.id, credential.public_key_cose,
-//          credential.counter, credential.transports, credential.aaguid
+//          credential.counter, credential.transports, credential.aaguid,
+//          credential.backup_eligible, credential.backup_state
 
 // ── 2. Authentication (username-first flow) ───────────────────────
 // `_for_user` records the user_handle on the state so
@@ -129,7 +130,10 @@ let (challenge, state) = wa.start_authentication_with_creds_for_user(
 let response: AuthenticationResponse = todo!();
 
 let outcome = wa.finish_authentication(&state, &response, &credential)?;
-// Update stored counter: credential.counter = outcome.new_counter
+// Update the stored credential:
+//   credential.counter = outcome.new_counter;
+//   credential.backup_eligible = Some(outcome.backup_eligible);
+//   credential.backup_state = Some(outcome.backup_state);
 ```
 
 ### Post-quantum credentials (`pqc` feature)
@@ -156,10 +160,36 @@ does not compile `ml-dsa`.
 
 ### Stored credentials
 
-`PasskeyCredential` serialises to the same JSON in 0.2 as in 0.1, and
-credentials stored by 0.1.3 deserialise and verify unchanged
+`PasskeyCredential` JSON stored by 0.1.x and 0.2.0 deserialises and
+verifies unchanged, and serialises back to the same bytes
 (`tests/compat_0_1_3.rs` checks this against credentials produced by
 the published 0.1.3 crate).
+
+Those credentials have no backup flags: `backup_eligible` and
+`backup_state` are `None` (unknown). The first assertion is accepted
+with either BE value, and `AuthSuccess::backup_eligible` and
+`AuthSuccess::backup_state` carry the values to store. From then on an
+assertion with a different BE fails with
+`Error::BackupEligibilityChanged`. BS may change at any sign-in.
+
+`PasskeyCredential` and `AuthSuccess` are `#[non_exhaustive]`. To turn
+a credential kept in your own format into a `PasskeyCredential`, use
+the constructor and set the other public fields:
+
+```rust,ignore
+use passkey_auth::{CosePublicKey, CredentialId, PasskeyCredential};
+
+let mut credential = PasskeyCredential::new(
+    CredentialId(row.id),
+    CosePublicKey(row.cose_key), // COSE_Key bytes, as the authenticator sent them
+    row.counter,
+);
+credential.transports = row.transports;
+credential.backup_eligible = row.backup_eligible; // Option<bool>, None if never stored
+credential.backup_state = row.backup_state;
+```
+
+`Error` is `#[non_exhaustive]` too, so a `match` on it needs a `_` arm.
 
 ### RP ID parsing from URLs
 
@@ -248,12 +278,13 @@ NIST ACVP ML-DSA sigVer vectors.
 
 ```bash
 cargo bench --bench verify --features pqc               # finish_registration / finish_authentication per algorithm
-cargo bench --bench parsers --features __internals      # CBOR, authenticator data, COSE_Key, clientDataJSON
+RUSTFLAGS="--cfg fuzzing" cargo bench --bench parsers  # CBOR, authenticator data, COSE_Key, clientDataJSON
 cargo test --all-features --test alloc_count -- --nocapture   # heap allocations per verify path
 ```
 
-The `__internals` feature exposes the parsers to the benchmarks and the
-fuzz targets. It is not part of the public API.
+The parsers are reachable from the benchmarks and the fuzz targets only
+under `--cfg fuzzing`, which cargo-fuzz sets. No Cargo feature exposes
+them, and they are not part of the public API.
 
 ### Fuzzing
 

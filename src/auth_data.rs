@@ -128,6 +128,12 @@ impl<'a> AuthenticatorData<'a> {
     pub(crate) fn user_verified(&self) -> bool {
         self.flags & FLAG_UV != 0
     }
+    pub(crate) fn backup_eligible(&self) -> bool {
+        self.flags & FLAG_BE != 0
+    }
+    pub(crate) fn backed_up(&self) -> bool {
+        self.flags & FLAG_BS != 0
+    }
 
     /// Refuses BS (backed up) without BE (backup eligible), the invalid
     /// combination of WebAuthn-3 §6.1.3.

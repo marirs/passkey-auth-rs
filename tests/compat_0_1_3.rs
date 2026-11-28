@@ -88,6 +88,28 @@ fn stored_assertion_verifies_against_stored_credential() {
 }
 
 #[test]
+fn stored_credentials_load_with_unknown_backup_flags() {
+    let (wa, entries) = fixtures();
+    for entry in &entries {
+        let credential: PasskeyCredential =
+            serde_json::from_str(field(entry, "credential_registered")).expect("credential");
+        assert_eq!(credential.backup_eligible, None);
+        assert_eq!(credential.backup_state, None);
+
+        // The recorded assertion has BE and BS clear; the caller stores those.
+        let state: AuthenticationState =
+            serde_json::from_str(field(entry, "authentication_state")).expect("state");
+        let response: AuthenticationResponse =
+            serde_json::from_str(field(entry, "authentication_response")).expect("response");
+        let outcome = wa
+            .finish_authentication(&state, &response, &credential)
+            .unwrap_or_else(|e| panic!("{}: {e}", field(entry, "name")));
+        assert!(!outcome.backup_eligible);
+        assert!(!outcome.backup_state);
+    }
+}
+
+#[test]
 fn credential_json_round_trips_byte_for_byte() {
     let (_, entries) = fixtures();
     for entry in &entries {

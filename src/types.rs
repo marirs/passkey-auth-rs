@@ -289,6 +289,7 @@ pub struct AuthenticationResponse {
 /// All byte fields are base64url-encoded; the client JS is expected
 /// to decode them before passing to the WebAuthn API.
 #[derive(Debug, Serialize)]
+#[non_exhaustive]
 pub struct RegistrationChallenge {
     /// The challenge, base64url-encoded.
     pub challenge: String,
@@ -358,6 +359,7 @@ pub struct CredentialDescriptor {
 
 /// `authenticatorSelection` member of the registration options.
 #[derive(Debug, Serialize, Clone)]
+#[non_exhaustive]
 pub struct AuthenticatorSelection {
     /// Authenticator class from [`crate::Attachment`]: `"platform"` (the
     /// default), `"cross-platform"`, or omitted for any.
@@ -376,6 +378,7 @@ pub struct AuthenticatorSelection {
 
 /// What we send to the browser for `navigator.credentials.get()`.
 #[derive(Debug, Serialize)]
+#[non_exhaustive]
 pub struct AuthenticationChallenge {
     /// The challenge, base64url-encoded.
     pub challenge: String,
@@ -483,7 +486,11 @@ pub(crate) fn now_secs() -> u64 {
 /// The wire shape is the natural serde-of-struct mapping; field-level
 /// derives on `CredentialId` and `CosePublicKey` produce base64-ish
 /// transparent byte vecs.
+///
+/// The struct is `#[non_exhaustive]`: build one from stored parts with
+/// [`PasskeyCredential::new`] and set the other public fields after.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct PasskeyCredential {
     /// Credential ID the authenticator assigned.
     pub id: CredentialId,
@@ -503,15 +510,55 @@ pub struct PasskeyCredential {
     /// AAGUID is all zeros anyway; meaningful values only appear when
     /// the client opts into a non-"none" attestation format.
     pub aaguid: [u8; 16],
+    /// The authenticator's BE (backup eligible) flag: whether the
+    /// credential can be synced or backed up. It is fixed for the life of
+    /// the credential, so `finish_authentication` fails with
+    /// [`Error::BackupEligibilityChanged`] when an assertion reports a
+    /// different value (WebAuthn-3 §7.2 step 17).
+    ///
+    /// `None` means unknown: credentials stored by 0.1.x and 0.2.0 have
+    /// no such field. The first assertion for such a credential is
+    /// accepted with either value, and its
+    /// [`AuthSuccess::backup_eligible`] is the value to store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_eligible: Option<bool>,
+    /// The authenticator's BS (backed up) flag at the last ceremony:
+    /// whether the credential is currently backed up. It may change
+    /// between assertions; update it from [`AuthSuccess::backup_state`].
+    /// `None` means unknown, as for [`Self::backup_eligible`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_state: Option<bool>,
+}
+
+impl PasskeyCredential {
+    /// Builds a credential from stored parts, for callers that keep
+    /// credentials in their own format. `transports` starts empty, `aaguid`
+    /// all zeros and both backup flags unknown (`None`); set the public
+    /// fields to the stored values where they are known.
+    #[must_use]
+    pub fn new(id: CredentialId, public_key_cose: CosePublicKey, counter: u32) -> Self {
+        Self {
+            id,
+            public_key_cose,
+            counter,
+            transports: Vec::new(),
+            aaguid: [0; 16],
+            backup_eligible: None,
+            backup_state: None,
+        }
+    }
 }
 
 /// Successful authentication outcome. Caller updates the stored
-/// credential's `counter` to `new_counter` before responding.
+/// credential's `counter` to `new_counter`, `backup_eligible` to
+/// `Some(backup_eligible)` and `backup_state` to `Some(backup_state)`
+/// before responding.
 ///
 /// `Serialize + Deserialize` are derived for symmetry with
 /// [`PasskeyCredential`] — useful when an outer service wants to log
 /// or forward the outcome as JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct AuthSuccess {
     /// The credential that signed the assertion.
     pub credential_id: CredentialId,
@@ -519,6 +566,11 @@ pub struct AuthSuccess {
     pub new_counter: u32,
     /// Whether the authenticator set the UV flag.
     pub user_verified: bool,
+    /// The assertion's BE (backup eligible) flag. Equal to the stored
+    /// value when that is known; store it when the stored value is `None`.
+    pub backup_eligible: bool,
+    /// The assertion's BS (backed up) flag, to store with the credential.
+    pub backup_state: bool,
 }
 
 #[cfg(test)]
@@ -658,6 +710,8 @@ mod tests {
             counter: 7,
             transports: vec!["usb".into(), "nfc".into()],
             aaguid: [0xFE; 16],
+            backup_eligible: Some(true),
+            backup_state: Some(false),
         }
     }
 
@@ -671,6 +725,30 @@ mod tests {
         assert_eq!(back.counter, original.counter);
         assert_eq!(back.transports, original.transports);
         assert_eq!(back.aaguid, original.aaguid);
+        assert_eq!(back.backup_eligible, original.backup_eligible);
+        assert_eq!(back.backup_state, original.backup_state);
+    }
+
+    #[test]
+    fn passkey_credential_json_without_backup_flags_loads_as_unknown() {
+        let wire = r#"{"id":[1,2],"public_key_cose":[170],"counter":3,"transports":[],"aaguid":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}"#;
+        let credential: PasskeyCredential = serde_json::from_str(wire).expect("deserialise");
+        assert_eq!(credential.backup_eligible, None);
+        assert_eq!(credential.backup_state, None);
+        assert_eq!(serde_json::to_string(&credential).expect("serialise"), wire);
+    }
+
+    #[test]
+    fn passkey_credential_new_leaves_optional_parts_unset() {
+        let credential =
+            PasskeyCredential::new(CredentialId(vec![9]), CosePublicKey(vec![0xA0]), 4);
+        assert_eq!(credential.id.as_bytes(), [9]);
+        assert_eq!(credential.public_key_cose.as_bytes(), [0xA0]);
+        assert_eq!(credential.counter, 4);
+        assert!(credential.transports.is_empty());
+        assert_eq!(credential.aaguid, [0; 16]);
+        assert_eq!(credential.backup_eligible, None);
+        assert_eq!(credential.backup_state, None);
     }
 
     #[test]
@@ -679,11 +757,15 @@ mod tests {
             credential_id: CredentialId(vec![0xDE, 0xAD, 0xBE, 0xEF]),
             new_counter: 42,
             user_verified: true,
+            backup_eligible: true,
+            backup_state: true,
         };
         let wire = serde_json::to_string(&original).expect("serialise");
         let back: AuthSuccess = serde_json::from_str(&wire).expect("deserialise");
         assert_eq!(back.credential_id.0, original.credential_id.0);
         assert_eq!(back.new_counter, original.new_counter);
         assert_eq!(back.user_verified, original.user_verified);
+        assert_eq!(back.backup_eligible, original.backup_eligible);
+        assert_eq!(back.backup_state, original.backup_state);
     }
 }
