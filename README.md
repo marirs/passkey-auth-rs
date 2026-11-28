@@ -240,7 +240,7 @@ browser (Touch ID, Windows Hello, iCloud Keychain, Yubikey, etc.).
 
 | Example | Framework | What it shows |
 |---|---|---|
-| [`axum_server`](examples/axum_server.rs) | Axum 0.8 | Minimal single-user register + authenticate |
+| [`axum_server`](examples/axum_server.rs) | Axum 0.8 | Minimal single-user register + authenticate; with `--features pqc` it offers ML-DSA-44/65/87 ahead of ES256, EdDSA and RS256 |
 | [`rocket_server`](examples/rocket_server.rs) | Rocket 0.5 | Same as above, Rocket variant |
 | [`axum_passwordless`](examples/axum_passwordless.rs) | Axum 0.8 | **Multi-user** with **usernameless** sign-in (Gmail-style "tap to sign in", discoverable credentials, browser shows account picker) |
 | [`rocket_credential_manager`](examples/rocket_credential_manager.rs) | Rocket 0.5 | **Multiple devices per user**: register additional passkeys while signed in, list them, remove individual ones (refuses to remove the last) |
@@ -248,6 +248,7 @@ browser (Touch ID, Windows Hello, iCloud Keychain, Yubikey, etc.).
 
 ```bash
 cargo run --example axum_server                # start here
+cargo run --example axum_server --features pqc # the same, offering ML-DSA first
 cargo run --example axum_passwordless          # then try the Gmail flow
 cargo run --example rocket_credential_manager  # then try multi-device
 cargo run --example axum_sqlite                # then try persistence

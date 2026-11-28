@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.1 - 2026-11-28
+
+### Added
+
+- The `axum_server` example runs with `--features pqc`: it turns on
+  `allow_ml_dsa(true)`, so registration offers ML-DSA-44, ML-DSA-65 and
+  ML-DSA-87 ahead of ES256, EdDSA and RS256, and prints the offered
+  algorithms at start-up. No library code changed.
+
 ## 0.3.0 - 2026-11-28
 
 ### Upgrading from 0.2
