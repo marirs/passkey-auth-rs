@@ -1,11 +1,11 @@
 # passkey-auth
 
-[![CI](https://github.com/marirs/passkey-auth/actions/workflows/ci.yml/badge.svg)](https://github.com/marirs/passkey-auth/actions/workflows/ci.yml)
+[![CI](https://github.com/marirs/passkey-auth-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/marirs/passkey-auth-rs/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/passkey-auth.svg)](https://crates.io/crates/passkey-auth)
 [![docs.rs](https://img.shields.io/docsrs/passkey-auth)](https://docs.rs/passkey-auth)
 [![License](https://img.shields.io/crates/l/passkey-auth.svg)](#license)
 [![MSRV](https://img.shields.io/badge/MSRV-1.89-blue.svg)](https://blog.rust-lang.org/)
-[![Dependencies](https://deps.rs/repo/github/marirs/passkey-auth/status.svg)](https://deps.rs/repo/github/marirs/passkey-auth)
+[![Dependencies](https://deps.rs/repo/github/marirs/passkey-auth-rs/status.svg)](https://deps.rs/repo/github/marirs/passkey-auth-rs)
 
 Pure-Rust WebAuthn server library focused on the passkey ceremony.
 Verifies registration + authentication responses from browsers/OS
@@ -30,19 +30,29 @@ MSRV: **Rust 1.89** (edition 2024).
 
 ## Why this exists
 
-The reference Rust server library, `webauthn-rs`, hard-depends on
-`openssl`. This crate is the alternative for projects that ship
-rustcrypto end-to-end:
+`webauthn-rs` is the full-featured Rust WebAuthn library. Since 0.6 it
+runs on RustCrypto as well (0.5 and earlier needed `openssl`), so both
+crates build without a C toolchain. This crate stays small and covers
+the passkey ceremonies only; it adds ML-DSA (post-quantum) credentials
+and parses with its own borrowing CBOR decoder. Pick `webauthn-rs` when
+you need attestation policy against the FIDO Metadata Service or the
+wider algorithm set.
 
-| Concern                | This crate                                                     | webauthn-rs              |
-|------------------------|----------------------------------------------------------------|--------------------------|
-| ECDSA P-256 verify     | [`p256`](https://crates.io/crates/p256)                        | openssl                  |
-| Ed25519 verify         | [`ed25519-dalek`](https://crates.io/crates/ed25519-dalek)      | openssl                  |
-| RSA PKCS#1 v1.5 verify | [`rsa`](https://crates.io/crates/rsa) (public-key operations)  | openssl                  |
-| ML-DSA verify          | [`ml-dsa`](https://crates.io/crates/ml-dsa) (`pqc` feature)    | not supported            |
-| SHA-256                | [`sha2`](https://crates.io/crates/sha2)                        | openssl                  |
-| CBOR                   | built-in borrowing decoder                                     | serde_cbor (deprecated)  |
-| Attestation chain      | x5c sig verified, root NOT validated                           | full X.509 + FIDO MDS    |
+Compared with `webauthn-rs` 0.6.2 (November 2026):
+
+| Concern                 | This crate (0.3)                                                       | webauthn-rs 0.6.2                                          |
+|-------------------------|------------------------------------------------------------------------|------------------------------------------------------------|
+| Crypto backend          | RustCrypto (`p256`, `ed25519-dalek`, `rsa`, `sha2`), no openssl        | RustCrypto through `crypto-glue`, no openssl               |
+| Signature algorithms    | ES256, EdDSA, RS256                                                    | ES256, ES384, ES512, EdDSA, RS256/384/512, PS256/384/512   |
+| ML-DSA (post-quantum)   | ML-DSA-44, -65, -87 with the `pqc` feature (RustCrypto `ml-dsa`)       | not supported                                              |
+| CBOR                    | built-in borrowing decoder                                             | `serde_cbor_2`                                             |
+| Attestation             | x5c signature verified; root not validated, no FIDO MDS                | full X.509 chain, attestation CA lists, FIDO MDS (`fido-mds`) |
+| Backup flags (BE/BS)    | stored; a changed BE is refused                                        | stored; a changed BE is refused, with an opt-in upgrade to eligible |
+| Dependencies (normal)   | 123 crates (129 with `pqc`)                                            | 227 crates                                                 |
+| MSRV                    | 1.89                                                                   | 1.89                                                       |
+| Licence                 | MIT OR Apache-2.0                                                      | MPL-2.0                                                    |
+
+Dependency counts are `cargo tree -e normal` with default features.
 
 ## Scope
 
