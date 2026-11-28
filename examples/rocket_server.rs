@@ -199,6 +199,10 @@ fn authenticate_finish(
 
     stored.counter = outcome.new_counter;
 
+    stored.backup_eligible = Some(outcome.backup_eligible);
+
+    stored.backup_state = Some(outcome.backup_state);
+
     Ok(Json(AuthFinishReply {
         ok: true,
         user_verified: outcome.user_verified,

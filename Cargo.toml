@@ -1,6 +1,6 @@
 [package]
 name        = "passkey-auth"
-version     = "0.2.0"
+version     = "0.3.0"
 edition     = "2024"
 rust-version = "1.89"
 license     = "MIT OR Apache-2.0"
@@ -57,9 +57,11 @@ ml-dsa        = { version = "0.1.2", default-features = false, features = ["allo
 default = []
 # ML-DSA-44/65/87 credentials (COSE algorithms -48/-49/-50, RFC 9964).
 pqc     = ["dep:ml-dsa"]
-# Exposes the parsers to the fuzz targets in fuzz/ and the parser
-# benchmarks in benches/. Not part of the public API; no semver promise.
-__internals = []
+
+# `cfg(fuzzing)` (set by cargo-fuzz) exposes the parsers to the fuzz
+# targets in fuzz/ and the parser benchmarks in benches/.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
 
 [dev-dependencies]
 # Known-vector regression tests live under tests/.
@@ -111,9 +113,8 @@ name    = "verify"
 harness = false
 
 [[bench]]
-name              = "parsers"
-harness           = false
-required-features = ["__internals"]
+name    = "parsers"
+harness = false
 
 [[example]]
 name = "axum_server"

@@ -463,6 +463,8 @@ impl Webauthn {
             counter: att.auth_data.sign_count,
             transports: response.transports.clone(),
             aaguid: *attested.aaguid,
+            backup_eligible: Some(att.auth_data.backup_eligible()),
+            backup_state: Some(att.auth_data.backed_up()),
         })
     }
 
@@ -723,11 +725,26 @@ impl Webauthn {
             });
         }
 
+        // 6. WebAuthn-3 §7.2 step 17: BE is fixed for the life of a
+        // credential. Checked after the signature, like the counter, so
+        // the error reports what the key holder's authenticator sent. A
+        // credential stored without BE (0.1.x, 0.2.0) accepts either value
+        // and the caller stores the one returned below.
+        if let Some(stored_be) = stored.backup_eligible
+            && stored_be != ad.backup_eligible()
+        {
+            return Err(Error::BackupEligibilityChanged {
+                stored: stored_be,
+                new: ad.backup_eligible(),
+            });
+        }
+
         Ok(AuthSuccess {
             credential_id: stored.id.clone(), // copy: returned to the caller
-
             new_counter: ad.sign_count,
             user_verified: ad.user_verified(),
+            backup_eligible: ad.backup_eligible(),
+            backup_state: ad.backed_up(),
         })
     }
 }

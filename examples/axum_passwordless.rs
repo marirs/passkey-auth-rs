@@ -248,6 +248,10 @@ async fn authenticate_finish(
         .map_err(|e| AppError::Unauthorized(format!("auth verify failed: {e}")))?;
 
     stored.counter = outcome.new_counter;
+
+    stored.backup_eligible = Some(outcome.backup_eligible);
+
+    stored.backup_state = Some(outcome.backup_state);
     drop(users);
 
     // ── Session rotation ────────────────────────────────────────────

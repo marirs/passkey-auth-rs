@@ -96,15 +96,11 @@ fn recorded_authentications() {
     for case in cases("authentication") {
         let is_ml_dsa = text(&case, "source").contains("ml_dsa");
         let id = CredentialId::from_b64url(text(&case, "id")).unwrap();
-        let stored = PasskeyCredential {
-            id: id.clone(),
-            public_key_cose: CosePublicKey(
-                B64URL.decode(text(&case, "credential_public_key")).unwrap(),
-            ),
-            counter: case["sign_count"].as_u64().unwrap() as u32,
-            transports: Vec::new(),
-            aaguid: [0; 16],
-        };
+        let stored = PasskeyCredential::new(
+            id.clone(),
+            CosePublicKey(B64URL.decode(text(&case, "credential_public_key")).unwrap()),
+            case["sign_count"].as_u64().unwrap() as u32,
+        );
         let state = AuthenticationState {
             challenge: challenge(&case),
             allow_credentials: vec![id],

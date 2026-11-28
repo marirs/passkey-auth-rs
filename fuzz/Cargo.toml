@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4.13"
-passkey-auth = { path = "..", features = ["__internals", "pqc"] }
+passkey-auth = { path = "..", features = ["pqc"] }
 
 # Keeps the fuzz crate out of any parent workspace.
 [workspace]

@@ -300,7 +300,9 @@ fn authentication_backup_flag_combinations() {
     let wa = webauthn();
     for alg in Alg::all() {
         for (backup, valid) in BACKUP_COMBINATIONS {
+            // Registered with the same BE, so only the combination is tested.
             let mut authenticator = Authenticator::new(alg, 21);
+            authenticator.flags = FLAG_UP | FLAG_UV | (backup & FLAG_BE);
             let credential = register(&wa, &authenticator).unwrap();
             authenticator.flags = FLAG_UP | FLAG_UV | backup;
             let result = authenticate(&wa, &mut authenticator, &credential);
@@ -314,6 +316,93 @@ fn authentication_backup_flag_combinations() {
                 assert!(matches!(result, Err(Error::AuthData(_))));
             }
         }
+    }
+}
+
+/// Registers an ES256 credential with `backup` (BE/BS bits) set.
+fn register_with_backup(wa: &Webauthn, backup: u8) -> (Authenticator, PasskeyCredential) {
+    let mut authenticator = Authenticator::new(Alg::Es256, 22);
+    authenticator.flags = FLAG_UP | FLAG_UV | backup;
+    let credential = register(wa, &authenticator).unwrap();
+    (authenticator, credential)
+}
+
+#[test]
+fn registration_stores_backup_flags() {
+    let wa = webauthn();
+    for (backup, be, bs) in [
+        (0, false, false),
+        (FLAG_BE, true, false),
+        (FLAG_BE | FLAG_BS, true, true),
+    ] {
+        let (_, credential) = register_with_backup(&wa, backup);
+        assert_eq!(credential.backup_eligible, Some(be), "flags {backup:#04x}");
+        assert_eq!(credential.backup_state, Some(bs), "flags {backup:#04x}");
+    }
+}
+
+#[test]
+fn backup_eligibility_change_rejected() {
+    let wa = webauthn();
+    for (registered, asserted, stored, new) in [
+        (FLAG_BE, 0, true, false),
+        (FLAG_BE | FLAG_BS, 0, true, false),
+        (0, FLAG_BE, false, true),
+        (0, FLAG_BE | FLAG_BS, false, true),
+    ] {
+        let (mut authenticator, credential) = register_with_backup(&wa, registered);
+        authenticator.flags = FLAG_UP | FLAG_UV | asserted;
+        let err = authenticate(&wa, &mut authenticator, &credential).unwrap_err();
+        assert!(
+            matches!(err, Error::BackupEligibilityChanged { stored: s, new: n } if s == stored && n == new),
+            "registered {registered:#04x}, asserted {asserted:#04x}: {err:?}"
+        );
+    }
+}
+
+#[test]
+fn backup_state_change_returned() {
+    let wa = webauthn();
+    let (mut authenticator, mut credential) = register_with_backup(&wa, FLAG_BE);
+    for (backup, bs) in [(FLAG_BE | FLAG_BS, true), (FLAG_BE, false)] {
+        authenticator.flags = FLAG_UP | FLAG_UV | backup;
+        let outcome = authenticate(&wa, &mut authenticator, &credential).unwrap();
+        assert!(outcome.backup_eligible);
+        assert_eq!(outcome.backup_state, bs);
+        credential.counter = outcome.new_counter;
+        credential.backup_state = Some(outcome.backup_state);
+    }
+}
+
+#[test]
+fn unknown_backup_eligibility_adopted_from_first_assertion() {
+    let wa = webauthn();
+    for (asserted, be, bs) in [
+        (0, false, false),
+        (FLAG_BE, true, false),
+        (FLAG_BE | FLAG_BS, true, true),
+    ] {
+        let (mut authenticator, registered) = register_with_backup(&wa, asserted & FLAG_BE);
+        // A credential stored by 0.1.x or 0.2.0: no backup flags.
+        let mut credential = PasskeyCredential::new(
+            registered.id,
+            registered.public_key_cose,
+            registered.counter,
+        );
+        authenticator.flags = FLAG_UP | FLAG_UV | asserted;
+        let outcome = authenticate(&wa, &mut authenticator, &credential).unwrap();
+        assert_eq!(outcome.backup_eligible, be, "flags {asserted:#04x}");
+        assert_eq!(outcome.backup_state, bs, "flags {asserted:#04x}");
+
+        // Once stored, the adopted BE is enforced.
+        credential.counter = outcome.new_counter;
+        credential.backup_eligible = Some(outcome.backup_eligible);
+        authenticator.flags = FLAG_UP | FLAG_UV | if be { 0 } else { FLAG_BE };
+        let err = authenticate(&wa, &mut authenticator, &credential).unwrap_err();
+        assert!(
+            matches!(err, Error::BackupEligibilityChanged { .. }),
+            "flags {asserted:#04x}: {err:?}"
+        );
     }
 }
 
