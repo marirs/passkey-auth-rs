@@ -3,6 +3,9 @@
 //! Run with:
 //!     cargo run --example axum_server
 //!
+//! With post-quantum (ML-DSA) passkeys offered first:
+//!     cargo run --example axum_server --features pqc
+//!
 //! Then open http://localhost:3000 in a passkey-capable browser
 //! (Chrome 108+, Safari 16+, Firefox 122+, Edge 108+). The page
 //! lets you register a passkey for "alice@example.com" and then
@@ -303,7 +306,12 @@ async fn main() {
         // UV preferred (not required) so even a hardware-key tap counts.
         // For a real production passkey deployment, flip this to true.
         .require_user_verification(false);
+    // ML-DSA-44/65/87 go first in pubKeyCredParams. An authenticator without
+    // ML-DSA registers ES256, EdDSA or RS256 instead, so nobody is locked out.
+    #[cfg(feature = "pqc")]
+    let wa = wa.allow_ml_dsa(true);
 
+    let offered = wa.allowed_algs();
     let state = Arc::new(AppState {
         user: Mutex::new(User::default()),
         sessions: Mutex::new(HashMap::new()),
@@ -322,6 +330,7 @@ async fn main() {
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
     println!("passkey demo listening on http://localhost:3000");
+    println!("offered COSE algorithms, most preferred first: {offered:?}");
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
